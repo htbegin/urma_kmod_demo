@@ -1,1 +1,0 @@
-savedcmd_/home/htbegin/code/oe_knl/urma_kmod_demo/modules.order := {   echo /home/htbegin/code/oe_knl/urma_kmod_demo/urma_demo_client.o;   echo /home/htbegin/code/oe_knl/urma_kmod_demo/urma_demo_server.o; :; } > /home/htbegin/code/oe_knl/urma_kmod_demo/modules.order

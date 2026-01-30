@@ -1,1 +1,0 @@
-savedcmd_/home/htbegin/code/oe_knl/urma_kmod_demo/urma_demo_client.mod := printf '%s\n'   urma_client.o | awk '!x[$$0]++ { print("/home/htbegin/code/oe_knl/urma_kmod_demo/"$$0) }' > /home/htbegin/code/oe_knl/urma_kmod_demo/urma_demo_client.mod

@@ -1,0 +1,6 @@
+# Build artifacts
+*.o
+*.mod
+*.cmd
+modules.order
+.*.cmd
