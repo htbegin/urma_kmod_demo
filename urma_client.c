@@ -36,12 +36,6 @@ static unsigned int server_jetty_id;
 module_param(server_jetty_id, uint, 0444);
 MODULE_PARM_DESC(server_jetty_id, "Server jetty ID");
 
-static unsigned int server_jetty_token;
-module_param(server_jetty_token, uint, 0444);
-MODULE_PARM_DESC(
-	server_jetty_token,
-	"Server jetty token for PLAIN_TEXT policy (required when token policy is enabled)");
-
 static char *device_name = "";
 module_param(device_name, charp, 0444);
 MODULE_PARM_DESC(device_name,
@@ -84,7 +78,6 @@ struct urma_client_ctx {
 	bool initialized;
 	bool connected;
 	u32 eid_index;
-	u32 jetty_token;
 };
 
 static struct urma_client_ctx g_client_ctx;
@@ -186,11 +179,7 @@ static int urma_client_create_resources(struct urma_client_ctx *ctx)
 
 	/* Create JFR (receive queue) for RM mode */
 	jfr_cfg.depth = URMA_DEMO_JFR_DEPTH;
-	jfr_cfg.flag.bs.token_policy = UBCORE_TOKEN_PLAIN_TEXT;
-	get_random_bytes(&ctx->jetty_token, sizeof(ctx->jetty_token));
-	if (ctx->jetty_token == 0)
-		ctx->jetty_token = 1;
-	jfr_cfg.token_value.token = ctx->jetty_token;
+	jfr_cfg.flag.bs.token_policy = UBCORE_TOKEN_NONE;
 	jfr_cfg.trans_mode = UBCORE_TP_RM;
 	jfr_cfg.eid_index = ctx->eid_index;
 	jfr_cfg.max_sge = 1;
@@ -347,11 +336,6 @@ static int urma_client_connect(struct urma_client_ctx *ctx)
 		       URMA_CLIENT_NAME);
 		return -EINVAL;
 	}
-	if (server_jetty_token == 0) {
-		pr_err("%s: server_jetty_token must be specified for PLAIN_TEXT policy\n",
-		       URMA_CLIENT_NAME);
-		return -EINVAL;
-	}
 
 	/* Parse server EID */
 	if (urma_demo_parse_eid(server_eid, ctx->server_eid_raw) != 0) {
@@ -370,8 +354,7 @@ static int urma_client_connect(struct urma_client_ctx *ctx)
 	tjetty_cfg.trans_mode = UBCORE_TP_RM;
 	tjetty_cfg.eid_index = ctx->eid_index;
 	tjetty_cfg.type = UBCORE_JFR; /* For RM mode, target is JFR */
-	tjetty_cfg.flag.bs.token_policy = UBCORE_TOKEN_PLAIN_TEXT;
-	tjetty_cfg.token_value.token = server_jetty_token;
+	tjetty_cfg.flag.bs.token_policy = UBCORE_TOKEN_NONE;
 
 	/* Import server's jetty (for RM mode, this creates connection) */
 	ctx->tjetty = ubcore_import_jetty(ctx->ub_dev, &tjetty_cfg, NULL);
@@ -430,7 +413,6 @@ static int urma_client_send_seg_info(struct urma_client_ctx *ctx)
 	msg->token_id = ctx->local_seg->seg.token_id;
 	memcpy(msg->src_eid, ctx->jetty->jetty_id.eid.raw, URMA_DEMO_EID_SIZE);
 	msg->src_jetty_id = ctx->jetty->jetty_id.id;
-	msg->src_jetty_token = ctx->jetty_token;
 
 	pr_info("%s: Sending seg info: va=0x%llx, len=%u, jetty_id=%u\n",
 		URMA_CLIENT_NAME, msg->seg_va, msg->seg_len, msg->src_jetty_id);

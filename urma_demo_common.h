@@ -59,8 +59,7 @@ struct urma_demo_seg_info_msg {
 	u32 token_id; /* Token ID */
 	u8 src_eid[URMA_DEMO_EID_SIZE]; /* Client's EID (16 bytes) */
 	u32 src_jetty_id; /* Client's jetty ID for reply */
-	u32 src_jetty_token; /* Client's jetty token (plain text) */
-	u8 reserved2[16]; /* Padding to 64 bytes */
+	u8 reserved2[20]; /* Padding to 64 bytes */
 } __packed;
 
 /*

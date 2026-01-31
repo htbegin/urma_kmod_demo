@@ -50,12 +50,6 @@ module_param(client_jetty_id, uint, 0444);
 MODULE_PARM_DESC(client_jetty_id,
 		 "Client jetty ID for early jetty import (optional)");
 
-static unsigned int client_jetty_token;
-module_param(client_jetty_token, uint, 0444);
-MODULE_PARM_DESC(
-	client_jetty_token,
-	"Client jetty token for early import (optional, required for early import)");
-
 /* Server context structure */
 struct urma_server_ctx {
 	/* Device and client registration */
@@ -90,7 +84,6 @@ struct urma_server_ctx {
 	bool initialized;
 	bool waiting;
 	u32 eid_index;
-	u32 jetty_token;
 
 	/* Debugfs */
 	struct dentry *debugfs_dir;
@@ -195,11 +188,7 @@ static int urma_server_create_resources(struct urma_server_ctx *ctx)
 
 	/* Create JFR (receive queue) for RM mode */
 	jfr_cfg.depth = URMA_DEMO_JFR_DEPTH;
-	jfr_cfg.flag.bs.token_policy = UBCORE_TOKEN_PLAIN_TEXT;
-	get_random_bytes(&ctx->jetty_token, sizeof(ctx->jetty_token));
-	if (ctx->jetty_token == 0)
-		ctx->jetty_token = 1;
-	jfr_cfg.token_value.token = ctx->jetty_token;
+	jfr_cfg.flag.bs.token_policy = UBCORE_TOKEN_NONE;
 	jfr_cfg.trans_mode = UBCORE_TP_RM;
 	jfr_cfg.eid_index = ctx->eid_index;
 	jfr_cfg.max_sge = 1;
@@ -377,11 +366,6 @@ static int urma_server_import_client_seg(struct urma_server_ctx *ctx,
 	pr_info("%s: Importing client segment: va=0x%llx, len=%u, eid=%s, jetty_id=%u\n",
 		URMA_SERVER_NAME, msg->seg_va, msg->seg_len, eid_str,
 		msg->src_jetty_id);
-	if (msg->src_jetty_token == 0) {
-		pr_err("%s: client jetty token missing in message\n",
-		       URMA_SERVER_NAME);
-		return -EINVAL;
-	}
 
 	/* Import client's jetty for sending reply (skip if already imported early) */
 	if (!ctx->client_tjetty) {
@@ -390,8 +374,7 @@ static int urma_server_import_client_seg(struct urma_server_ctx *ctx,
 		tjetty_cfg.trans_mode = UBCORE_TP_RM;
 		tjetty_cfg.eid_index = ctx->eid_index;
 		tjetty_cfg.type = UBCORE_JFR;
-		tjetty_cfg.flag.bs.token_policy = UBCORE_TOKEN_PLAIN_TEXT;
-		tjetty_cfg.token_value.token = msg->src_jetty_token;
+		tjetty_cfg.flag.bs.token_policy = UBCORE_TOKEN_NONE;
 
 		ctx->client_tjetty =
 			ubcore_import_jetty(ctx->ub_dev, &tjetty_cfg, NULL);
@@ -707,11 +690,6 @@ static int urma_server_import_client_jetty_early(struct urma_server_ctx *ctx)
 		       client_eid);
 		return ret;
 	}
-	if (client_jetty_token == 0) {
-		pr_err("%s: client_jetty_token must be specified for early import\n",
-		       URMA_SERVER_NAME);
-		return -EINVAL;
-	}
 
 	/* Configure target jetty */
 	memcpy(tjetty_cfg.id.eid.raw, eid_raw, URMA_DEMO_EID_SIZE);
@@ -719,8 +697,7 @@ static int urma_server_import_client_jetty_early(struct urma_server_ctx *ctx)
 	tjetty_cfg.trans_mode = UBCORE_TP_RM;
 	tjetty_cfg.eid_index = ctx->eid_index;
 	tjetty_cfg.type = UBCORE_JFR;
-	tjetty_cfg.flag.bs.token_policy = UBCORE_TOKEN_PLAIN_TEXT;
-	tjetty_cfg.token_value.token = client_jetty_token;
+	tjetty_cfg.flag.bs.token_policy = UBCORE_TOKEN_NONE;
 
 	ctx->client_tjetty =
 		ubcore_import_jetty(ctx->ub_dev, &tjetty_cfg, NULL);
@@ -782,8 +759,7 @@ static int urma_server_add_dev(struct ubcore_device *ub_dev)
 	}
 
 	/* Optionally import client jetty early if parameters are provided */
-	if (strlen(client_eid) > 0 && client_jetty_id != 0 &&
-	    client_jetty_token != 0) {
+	if (strlen(client_eid) > 0 && client_jetty_id != 0) {
 		ret = urma_server_import_client_jetty_early(ctx);
 		if (ret) {
 			pr_warn("%s: early jetty import failed (%d), will import later from message\n",
@@ -801,13 +777,10 @@ static int urma_server_add_dev(struct ubcore_device *ub_dev)
 
 	urma_demo_format_eid(ctx->jetty->jetty_id.eid.raw, eid_str,
 			     sizeof(eid_str));
-	pr_info("%s: Server ready. EID=%s, jetty_id=%u, jetty_token=0x%x\n",
-		URMA_SERVER_NAME, eid_str, ctx->jetty->jetty_id.id,
-		ctx->jetty_token);
+	pr_info("%s: Server ready. EID=%s, jetty_id=%u\n", URMA_SERVER_NAME,
+		eid_str, ctx->jetty->jetty_id.id);
 	pr_info("%s: Write to /sys/kernel/debug/%s/trigger to wait for client\n",
 		URMA_SERVER_NAME, URMA_SERVER_NAME);
-	pr_info("%s: Load client with server_jetty_token=0x%x\n",
-		URMA_SERVER_NAME, ctx->jetty_token);
 
 	return 0;
 }
