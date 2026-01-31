@@ -66,8 +66,12 @@ endif
 ifndef SERVER_JETTY_ID
 	$(error SERVER_JETTY_ID is not set. Usage: make load-client SERVER_EID=xx:xx:... SERVER_JETTY_ID=123)
 endif
+
+ifndef SERVER_JETTY_TOKEN
+	$(error SERVER_JETTY_TOKEN is not set. Usage: make load-client SERVER_EID=xx:xx:... SERVER_JETTY_ID=123 SERVER_JETTY_TOKEN=0x12345678)
+endif
 	@echo "Loading URMA client module..."
-	insmod urma_demo_client.ko server_eid=$(SERVER_EID) server_jetty_id=$(SERVER_JETTY_ID)
+	insmod urma_demo_client.ko server_eid=$(SERVER_EID) server_jetty_id=$(SERVER_JETTY_ID) server_jetty_token=$(SERVER_JETTY_TOKEN)
 
 # Unload modules
 unload:
@@ -93,7 +97,7 @@ help:
 	@echo "  make uninstall    - Remove modules from system"
 	@echo ""
 	@echo "  make load-server  - Load server module"
-	@echo "  make load-client SERVER_EID=<eid> SERVER_JETTY_ID=<id>"
+	@echo "  make load-client SERVER_EID=<eid> SERVER_JETTY_ID=<id> SERVER_JETTY_TOKEN=<token>"
 	@echo "                    - Load client module with server connection info"
 	@echo "  make unload       - Unload both modules"
 	@echo ""
@@ -111,6 +115,6 @@ help:
 	@echo "  make trigger-server"
 	@echo ""
 	@echo "  # On client machine:"
-	@echo "  make && make load-client SERVER_EID=00:00:00:00:00:00:00:00:00:00:00:00:c0:a8:01:01 SERVER_JETTY_ID=1"
+	@echo "  make && make load-client SERVER_EID=00:00:00:00:00:00:00:00:00:00:00:00:c0:a8:01:01 SERVER_JETTY_ID=1 SERVER_JETTY_TOKEN=0x12345678"
 
 .PHONY: all modules clean install uninstall load-server load-client unload trigger-server log help

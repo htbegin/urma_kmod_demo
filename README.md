@@ -73,7 +73,7 @@ sudo make load-server
 # Check kernel log for server's EID and jetty_id
 dmesg | grep urma_demo_server
 # Example output:
-# urma_demo_server: Server ready - EID: 00:00:00:00:00:00:00:00:00:00:00:00:c0:a8:01:02, jetty_id: 1
+# urma_demo_server: Server ready. EID=00:00:00:00:00:00:00:00:00:00:00:00:c0:a8:01:02, jetty_id=1, jetty_token=0x12345678
 ```
 
 Note down the EID and jetty_id values displayed.
@@ -94,12 +94,14 @@ sudo make trigger-server
 # Load client with server connection info
 sudo insmod urma_demo_client.ko \
     server_eid=00:00:00:00:00:00:00:00:00:00:00:00:c0:a8:01:02 \
-    server_jetty_id=1
+    server_jetty_id=1 \
+    server_jetty_token=0x12345678
 
 # Or use make target
 sudo make load-client \
     SERVER_EID=00:00:00:00:00:00:00:00:00:00:00:00:c0:a8:01:02 \
-    SERVER_JETTY_ID=1
+    SERVER_JETTY_ID=1 \
+    SERVER_JETTY_TOKEN=0x12345678
 ```
 
 ### Step 4: Verify Operation
@@ -147,6 +149,7 @@ sudo make unload
 |-----------|------|-------------|
 | `server_eid` | string | Server's EID in colon-separated hex format |
 | `server_jetty_id` | uint | Server's jetty ID for sending messages |
+| `server_jetty_token` | uint | Server's jetty token for PLAIN_TEXT policy |
 | `local_eid` | string | Local EID to select EID index (optional) |
 
 ### urma_demo_server.ko
@@ -157,19 +160,21 @@ sudo make unload
 | `local_eid` | string | Local EID to select EID index (optional) |
 | `client_eid` | string | Client's EID for early jetty import (optional) |
 | `client_jetty_id` | uint | Client's jetty ID for early jetty import (optional) |
+| `client_jetty_token` | uint | Client's jetty token for early jetty import (optional) |
 
 #### Early Client Jetty Import
 
-By default, the server imports the client's jetty after receiving the first message. For scenarios requiring early bidirectional communication setup (similar to RC connection mode), you can specify `client_eid` and `client_jetty_id` at module load time:
+By default, the server imports the client's jetty after receiving the first message. For scenarios requiring early bidirectional communication setup (similar to RC connection mode), you can specify `client_eid`, `client_jetty_id`, and `client_jetty_token` at module load time:
 
 ```bash
 # Load server with early client jetty import
 sudo insmod urma_demo_server.ko \
     client_eid=00:00:00:00:00:00:00:00:00:00:00:00:c0:a8:01:01 \
-    client_jetty_id=1
+    client_jetty_id=1 \
+    client_jetty_token=0x12345678
 ```
 
-When both parameters are provided, the server imports the client's jetty immediately during initialization. This imported jetty persists across multiple client requests (not cleaned up after each message exchange).
+When all three parameters are provided, the server imports the client's jetty immediately during initialization. This imported jetty persists across multiple client requests (not cleaned up after each message exchange).
 
 ## EID Format
 
