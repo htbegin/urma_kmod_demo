@@ -164,6 +164,8 @@ static int urma_client_create_resources(struct urma_client_ctx *ctx)
 	struct ubcore_jetty_cfg jetty_cfg = { 0 };
 	struct ubcore_seg_cfg seg_cfg = { 0 };
 	int ret;
+	size_t data_buf_len;
+	size_t msg_buf_len;
 	char eid_str[64];
 
 	/* Create JFC (completion queue) */
@@ -221,11 +223,20 @@ static int urma_client_create_resources(struct urma_client_ctx *ctx)
 	pr_info("%s: Jetty created, id=%u, eid=%s\n", URMA_CLIENT_NAME,
 		ctx->jetty->jetty_id.id, eid_str);
 
+	data_buf_len = ALIGN(URMA_DEMO_CLIENT_BUF_SIZE, 4096);
+	msg_buf_len = ALIGN(URMA_DEMO_MSG_BUF_SIZE, 4096);
+
 	/* Allocate and register data buffer (4KB for RDMA read) */
-	ctx->data_buf = kzalloc(URMA_DEMO_CLIENT_BUF_SIZE, GFP_KERNEL);
+	ctx->data_buf = kzalloc(data_buf_len, GFP_KERNEL);
 	if (!ctx->data_buf) {
 		ret = -ENOMEM;
 		goto err_delete_jetty;
+	}
+	if (!IS_ALIGNED((unsigned long)ctx->data_buf, 4096)) {
+		pr_err("%s: data buffer is not 4KB aligned\n",
+		       URMA_CLIENT_NAME);
+		ret = -EINVAL;
+		goto err_free_data_buf;
 	}
 
 	/* Fill buffer with magic pattern for verification */
@@ -234,7 +245,7 @@ static int urma_client_create_resources(struct urma_client_ctx *ctx)
 
 	/* Register data buffer as segment */
 	seg_cfg.va = (u64)ctx->data_buf;
-	seg_cfg.len = URMA_DEMO_CLIENT_BUF_SIZE;
+	seg_cfg.len = data_buf_len;
 	seg_cfg.flag.bs.token_policy = UBCORE_TOKEN_NONE;
 	seg_cfg.flag.bs.access = UBCORE_ACCESS_READ | UBCORE_ACCESS_WRITE;
 	seg_cfg.eid_index = ctx->eid_index;
@@ -253,14 +264,20 @@ static int urma_client_create_resources(struct urma_client_ctx *ctx)
 		ctx->local_seg->seg.len, seg_cfg.token_value.token);
 
 	/* Allocate and register send buffer */
-	ctx->send_buf = kzalloc(URMA_DEMO_MSG_BUF_SIZE, GFP_KERNEL);
+	ctx->send_buf = kzalloc(msg_buf_len, GFP_KERNEL);
 	if (!ctx->send_buf) {
 		ret = -ENOMEM;
 		goto err_unreg_data_seg;
 	}
+	if (!IS_ALIGNED((unsigned long)ctx->send_buf, 4096)) {
+		pr_err("%s: send buffer is not 4KB aligned\n",
+		       URMA_CLIENT_NAME);
+		ret = -EINVAL;
+		goto err_free_send_buf;
+	}
 
 	seg_cfg.va = (u64)ctx->send_buf;
-	seg_cfg.len = URMA_DEMO_MSG_BUF_SIZE;
+	seg_cfg.len = msg_buf_len;
 	get_random_bytes(&seg_cfg.token_value.token,
 			 sizeof(seg_cfg.token_value.token));
 
@@ -273,14 +290,20 @@ static int urma_client_create_resources(struct urma_client_ctx *ctx)
 	}
 
 	/* Allocate and register receive buffer */
-	ctx->recv_buf = kzalloc(URMA_DEMO_MSG_BUF_SIZE, GFP_KERNEL);
+	ctx->recv_buf = kzalloc(msg_buf_len, GFP_KERNEL);
 	if (!ctx->recv_buf) {
 		ret = -ENOMEM;
 		goto err_unreg_send_seg;
 	}
+	if (!IS_ALIGNED((unsigned long)ctx->recv_buf, 4096)) {
+		pr_err("%s: recv buffer is not 4KB aligned\n",
+		       URMA_CLIENT_NAME);
+		ret = -EINVAL;
+		goto err_free_recv_buf;
+	}
 
 	seg_cfg.va = (u64)ctx->recv_buf;
-	seg_cfg.len = URMA_DEMO_MSG_BUF_SIZE;
+	seg_cfg.len = msg_buf_len;
 	get_random_bytes(&seg_cfg.token_value.token,
 			 sizeof(seg_cfg.token_value.token));
 
