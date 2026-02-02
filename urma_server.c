@@ -91,6 +91,10 @@ struct urma_server_ctx {
 
 static struct urma_server_ctx g_server_ctx;
 
+static void urma_server_init_tjetty_cfg(struct ubcore_tjetty_cfg *cfg,
+					const u8 *eid, u32 jetty_id,
+					u32 eid_index);
+
 /*
  * Poll JFC for completions with timeout
  */
