@@ -58,16 +58,14 @@ load-server:
 	insmod urma_demo_server.ko
 	@echo "Check dmesg for server EID and jetty_id"
 
-# Load client module (requires server_eid and server_jetty_id)
+# Load client module (requires server_eid)
 load-client:
 ifndef SERVER_EID
-	$(error SERVER_EID is not set. Usage: make load-client SERVER_EID=xx:xx:... SERVER_JETTY_ID=123)
+	$(error SERVER_EID is not set. Usage: make load-client SERVER_EID=xx:xx:... SERVER_JETTY=120)
 endif
-ifndef SERVER_JETTY_ID
-	$(error SERVER_JETTY_ID is not set. Usage: make load-client SERVER_EID=xx:xx:... SERVER_JETTY_ID=123)
-endif
+	$(if $(SERVER_JETTY),,$(eval SERVER_JETTY := 120))
 	@echo "Loading URMA client module..."
-	insmod urma_demo_client.ko server_eid=$(SERVER_EID) server_jetty_id=$(SERVER_JETTY_ID)
+	insmod urma_demo_client.ko server_eid=$(SERVER_EID) server_jetty=$(SERVER_JETTY)
 
 # Unload modules
 unload:
@@ -93,7 +91,7 @@ help:
 	@echo "  make uninstall    - Remove modules from system"
 	@echo ""
 	@echo "  make load-server  - Load server module"
-	@echo "  make load-client SERVER_EID=<eid> SERVER_JETTY_ID=<id>"
+	@echo "  make load-client SERVER_EID=<eid> SERVER_JETTY=<id>"
 	@echo "                    - Load client module with server connection info"
 	@echo "  make unload       - Unload both modules"
 	@echo ""
@@ -111,6 +109,6 @@ help:
 	@echo "  make trigger-server"
 	@echo ""
 	@echo "  # On client machine:"
-	@echo "  make && make load-client SERVER_EID=00:00:00:00:00:00:00:00:00:00:00:00:c0:a8:01:01 SERVER_JETTY_ID=1"
+	@echo "  make && make load-client SERVER_EID=00:00:00:00:00:00:00:00:00:00:00:00:c0:a8:01:01 SERVER_JETTY=120"
 
 .PHONY: all modules clean install uninstall load-server load-client unload trigger-server log help
