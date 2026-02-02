@@ -781,6 +781,8 @@ static int urma_server_add_dev(struct ubcore_device *ub_dev)
 	ret = urma_server_select_eid_index(ub_dev, &ctx->eid_index);
 	if (ret)
 		return ret;
+	pr_info("%s: Selected EID index=%u\n", URMA_SERVER_NAME,
+		ctx->eid_index);
 
 	pr_info("%s: Using device %s\n", URMA_SERVER_NAME, ub_dev->dev_name);
 	ctx->ub_dev = ub_dev;
