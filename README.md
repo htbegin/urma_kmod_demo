@@ -147,7 +147,6 @@ sudo make unload
 |-----------|------|-------------|
 | `server_eid` | string | Server's EID in colon-separated hex format |
 | `server_jetty` | uint | Server jetty ID (default: 120) |
-| `server_jetty_id` | uint | Legacy server jetty ID (overrides default when `server_jetty` not set) |
 | `local_eid` | string | Local EID to select EID index (optional) |
 
 ### urma_demo_server.ko
@@ -159,7 +158,6 @@ sudo make unload
 | `server_jetty` | uint | Server jetty ID (default: 120) |
 | `client_eid` | string | Client's EID for early jetty import (optional) |
 | `client_jetty` | uint | Client jetty ID (default: 110) |
-| `client_jetty_id` | uint | Legacy client jetty ID (overrides default when `client_jetty` not set) |
 
 #### Early Client Jetty Import
 
