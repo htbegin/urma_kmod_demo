@@ -216,6 +216,7 @@ static int urma_server_create_resources(struct urma_server_ctx *ctx)
 	jetty_cfg.flag.bs.share_jfr = 1;
 	jetty_cfg.trans_mode = UBCORE_TP_RM;
 	jetty_cfg.eid_index = ctx->eid_index;
+	jetty_cfg.id = URMA_DEMO_WELL_KNOWN_JETTY_ID;
 	jetty_cfg.max_send_sge = 2; /* Need 2 for RDMA read (src/dst) */
 	jetty_cfg.max_recv_sge = 1;
 	jetty_cfg.rnr_retry = 7;
