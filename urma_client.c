@@ -377,6 +377,11 @@ static int urma_client_connect(struct urma_client_ctx *ctx)
 		       URMA_CLIENT_NAME);
 		return -EINVAL;
 	}
+	if (server_jetty_id != URMA_DEMO_WELL_KNOWN_JETTY_ID) {
+		pr_err("%s: server_jetty_id must be %u\n", URMA_CLIENT_NAME,
+		       URMA_DEMO_WELL_KNOWN_JETTY_ID);
+		return -EINVAL;
+	}
 
 	/* Parse server EID */
 	if (urma_demo_parse_eid(server_eid, ctx->server_eid_raw) != 0) {
@@ -387,11 +392,12 @@ static int urma_client_connect(struct urma_client_ctx *ctx)
 
 	urma_demo_format_eid(ctx->server_eid_raw, eid_str, sizeof(eid_str));
 	pr_info("%s: Connecting to server EID=%s, jetty_id=%u\n",
-		URMA_CLIENT_NAME, eid_str, server_jetty_id);
+		URMA_CLIENT_NAME, eid_str, URMA_DEMO_WELL_KNOWN_JETTY_ID);
 
 	/* Configure target jetty for import */
 	urma_client_init_tjetty_cfg(&tjetty_cfg, ctx->server_eid_raw,
-				    server_jetty_id, ctx->eid_index);
+				    URMA_DEMO_WELL_KNOWN_JETTY_ID,
+				    ctx->eid_index);
 
 	/* Import server's jetty (for RM mode, this creates connection) */
 	ctx->tjetty = ubcore_import_jetty(ctx->ub_dev, &tjetty_cfg, NULL);

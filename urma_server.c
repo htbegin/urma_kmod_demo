@@ -394,11 +394,17 @@ static int urma_server_import_client_seg(struct urma_server_ctx *ctx,
 	pr_info("%s: Importing client segment: va=0x%llx, len=%u, eid=%s, jetty_id=%u\n",
 		URMA_SERVER_NAME, msg->seg_va, msg->seg_len, eid_str,
 		msg->src_jetty_id);
+	if (msg->src_jetty_id != URMA_DEMO_WELL_KNOWN_JETTY_ID) {
+		pr_err("%s: client jetty_id must be %u\n", URMA_SERVER_NAME,
+		       URMA_DEMO_WELL_KNOWN_JETTY_ID);
+		return -EINVAL;
+	}
 
 	/* Import client's jetty for sending reply (skip if already imported early) */
 	if (!ctx->client_tjetty) {
 		urma_server_init_tjetty_cfg(&tjetty_cfg, msg->src_eid,
-					    msg->src_jetty_id, ctx->eid_index);
+					    URMA_DEMO_WELL_KNOWN_JETTY_ID,
+					    ctx->eid_index);
 
 		ctx->client_tjetty =
 			ubcore_import_jetty(ctx->ub_dev, &tjetty_cfg, NULL);
@@ -731,9 +737,15 @@ static int urma_server_import_client_jetty_early(struct urma_server_ctx *ctx)
 		       client_eid);
 		return ret;
 	}
+	if (client_jetty_id != URMA_DEMO_WELL_KNOWN_JETTY_ID) {
+		pr_err("%s: client_jetty_id must be %u\n", URMA_SERVER_NAME,
+		       URMA_DEMO_WELL_KNOWN_JETTY_ID);
+		return -EINVAL;
+	}
 
 	/* Configure target jetty */
-	urma_server_init_tjetty_cfg(&tjetty_cfg, eid_raw, client_jetty_id,
+	urma_server_init_tjetty_cfg(&tjetty_cfg, eid_raw,
+				    URMA_DEMO_WELL_KNOWN_JETTY_ID,
 				    ctx->eid_index);
 
 	ctx->client_tjetty =
