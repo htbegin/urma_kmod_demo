@@ -50,12 +50,6 @@ MODULE_PARM_DESC(
 	client_eid,
 	"Client EID for early jetty import (optional, format: xx:xx:...:xx)");
 
-static uint client_jetty_id;
-module_param(client_jetty_id, uint, 0444);
-MODULE_PARM_DESC(
-	client_jetty_id,
-	"Legacy client jetty ID (overrides default when client_jetty not set)");
-
 static unsigned int client_jetty = URMA_DEMO_CLIENT_JETTY_ID;
 module_param(client_jetty, uint, 0444);
 MODULE_PARM_DESC(client_jetty, "Client jetty ID (default: " __stringify(
@@ -180,9 +174,6 @@ static int urma_server_select_eid_index(struct ubcore_device *ub_dev,
 
 static u32 urma_server_effective_client_jetty(void)
 {
-	if (client_jetty_id != 0 && client_jetty == URMA_DEMO_CLIENT_JETTY_ID)
-		return client_jetty_id;
-
 	return client_jetty;
 }
 

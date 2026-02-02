@@ -26,7 +26,6 @@
 /* Default jetty ids */
 #define URMA_DEMO_CLIENT_JETTY_ID 110
 #define URMA_DEMO_SERVER_JETTY_ID 120
-#define URMA_DEMO_WELL_KNOWN_JETTY_ID 100
 
 /* Completion queue depth */
 #define URMA_DEMO_JFC_DEPTH 64
