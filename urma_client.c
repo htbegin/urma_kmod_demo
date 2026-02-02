@@ -32,9 +32,21 @@ MODULE_PARM_DESC(
 	server_eid,
 	"Server EID in format xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx");
 
+static unsigned int server_jetty = URMA_DEMO_SERVER_JETTY_ID;
+module_param(server_jetty, uint, 0444);
+MODULE_PARM_DESC(server_jetty, "Server jetty ID (default: " __stringify(
+				       URMA_DEMO_SERVER_JETTY_ID) ")");
+
 static unsigned int server_jetty_id;
 module_param(server_jetty_id, uint, 0444);
-MODULE_PARM_DESC(server_jetty_id, "Server jetty ID");
+MODULE_PARM_DESC(
+	server_jetty_id,
+	"Legacy server jetty ID (overrides default when server_jetty not set)");
+
+static unsigned int client_jetty = URMA_DEMO_CLIENT_JETTY_ID;
+module_param(client_jetty, uint, 0444);
+MODULE_PARM_DESC(client_jetty, "Client jetty ID (default: " __stringify(
+				       URMA_DEMO_CLIENT_JETTY_ID) ")");
 
 static char *device_name = "";
 module_param(device_name, charp, 0444);
@@ -154,6 +166,19 @@ static int urma_client_select_eid_index(struct ubcore_device *ub_dev,
 	return -ENODEV;
 }
 
+static u32 urma_client_effective_server_jetty(void)
+{
+	if (server_jetty_id != 0 && server_jetty == URMA_DEMO_SERVER_JETTY_ID)
+		return server_jetty_id;
+
+	return server_jetty;
+}
+
+static u32 urma_client_effective_client_jetty(void)
+{
+	return client_jetty;
+}
+
 static void urma_client_init_tjetty_cfg(struct ubcore_tjetty_cfg *cfg,
 					const u8 *eid, u32 jetty_id,
 					u32 eid_index)
@@ -220,7 +245,12 @@ static int urma_client_create_resources(struct urma_client_ctx *ctx)
 	jetty_cfg.flag.bs.share_jfr = 1;
 	jetty_cfg.trans_mode = UBCORE_TP_RM;
 	jetty_cfg.eid_index = ctx->eid_index;
-	jetty_cfg.id = URMA_DEMO_WELL_KNOWN_JETTY_ID;
+	jetty_cfg.id = urma_client_effective_client_jetty();
+	if (jetty_cfg.id == 0) {
+		pr_err("%s: client_jetty must be non-zero\n", URMA_CLIENT_NAME);
+		ret = -EINVAL;
+		goto err_delete_jfr;
+	}
 	jetty_cfg.max_send_sge = 1;
 	jetty_cfg.max_recv_sge = 1;
 	jetty_cfg.rnr_retry = 7;
@@ -372,17 +402,10 @@ static int urma_client_connect(struct urma_client_ctx *ctx)
 	struct ubcore_tjetty_cfg tjetty_cfg;
 	char eid_str[64];
 
-	if (strlen(server_eid) == 0 || server_jetty_id == 0) {
-		pr_err("%s: server_eid and server_jetty_id must be specified\n",
-		       URMA_CLIENT_NAME);
+	if (strlen(server_eid) == 0) {
+		pr_err("%s: server_eid must be specified\n", URMA_CLIENT_NAME);
 		return -EINVAL;
 	}
-	if (server_jetty_id != URMA_DEMO_WELL_KNOWN_JETTY_ID) {
-		pr_err("%s: server_jetty_id must be %u\n", URMA_CLIENT_NAME,
-		       URMA_DEMO_WELL_KNOWN_JETTY_ID);
-		return -EINVAL;
-	}
-
 	/* Parse server EID */
 	if (urma_demo_parse_eid(server_eid, ctx->server_eid_raw) != 0) {
 		pr_err("%s: invalid server_eid format: %s\n", URMA_CLIENT_NAME,
@@ -391,12 +414,22 @@ static int urma_client_connect(struct urma_client_ctx *ctx)
 	}
 
 	urma_demo_format_eid(ctx->server_eid_raw, eid_str, sizeof(eid_str));
-	pr_info("%s: Connecting to server EID=%s, jetty_id=%u\n",
-		URMA_CLIENT_NAME, eid_str, URMA_DEMO_WELL_KNOWN_JETTY_ID);
+	{
+		u32 remote_jetty = urma_client_effective_server_jetty();
+
+		if (remote_jetty == 0) {
+			pr_err("%s: server_jetty must be non-zero\n",
+			       URMA_CLIENT_NAME);
+			return -EINVAL;
+		}
+
+		pr_info("%s: Connecting to server EID=%s, jetty_id=%u\n",
+			URMA_CLIENT_NAME, eid_str, remote_jetty);
+	}
 
 	/* Configure target jetty for import */
 	urma_client_init_tjetty_cfg(&tjetty_cfg, ctx->server_eid_raw,
-				    URMA_DEMO_WELL_KNOWN_JETTY_ID,
+				    urma_client_effective_server_jetty(),
 				    ctx->eid_index);
 
 	/* Import server's jetty (for RM mode, this creates connection) */
@@ -637,7 +670,7 @@ static int urma_client_add_dev(struct ubcore_device *ub_dev)
 	}
 
 	/* Run test if server parameters are provided */
-	if (strlen(server_eid) > 0 && server_jetty_id > 0) {
+	if (strlen(server_eid) > 0) {
 		ret = urma_client_run_test(ctx);
 		if (ret) {
 			pr_err("%s: test failed: %d\n", URMA_CLIENT_NAME, ret);
@@ -649,7 +682,7 @@ static int urma_client_add_dev(struct ubcore_device *ub_dev)
 				     sizeof(eid_str));
 		pr_info("%s: Client ready. EID=%s, jetty_id=%u\n",
 			URMA_CLIENT_NAME, eid_str, ctx->jetty->jetty_id.id);
-		pr_info("%s: Load module with server_eid=<eid> server_jetty_id=<id> to run test\n",
+		pr_info("%s: Load module with server_eid=<eid> server_jetty=<id> to run test\n",
 			URMA_CLIENT_NAME);
 	}
 

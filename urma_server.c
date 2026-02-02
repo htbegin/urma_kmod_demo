@@ -38,6 +38,11 @@ MODULE_PARM_DESC(
 	local_eid,
 	"Local EID to select EID index (optional, format: xx:xx:...:xx)");
 
+static unsigned int server_jetty = URMA_DEMO_SERVER_JETTY_ID;
+module_param(server_jetty, uint, 0444);
+MODULE_PARM_DESC(server_jetty, "Server jetty ID (default: " __stringify(
+				       URMA_DEMO_SERVER_JETTY_ID) ")");
+
 /* Optional parameters for early client jetty import */
 static char *client_eid = "";
 module_param(client_eid, charp, 0444);
@@ -47,8 +52,14 @@ MODULE_PARM_DESC(
 
 static uint client_jetty_id;
 module_param(client_jetty_id, uint, 0444);
-MODULE_PARM_DESC(client_jetty_id,
-		 "Client jetty ID for early jetty import (optional)");
+MODULE_PARM_DESC(
+	client_jetty_id,
+	"Legacy client jetty ID (overrides default when client_jetty not set)");
+
+static unsigned int client_jetty = URMA_DEMO_CLIENT_JETTY_ID;
+module_param(client_jetty, uint, 0444);
+MODULE_PARM_DESC(client_jetty, "Client jetty ID (default: " __stringify(
+				       URMA_DEMO_CLIENT_JETTY_ID) ")");
 
 /* Server context structure */
 struct urma_server_ctx {
@@ -167,6 +178,19 @@ static int urma_server_select_eid_index(struct ubcore_device *ub_dev,
 	return -ENODEV;
 }
 
+static u32 urma_server_effective_client_jetty(void)
+{
+	if (client_jetty_id != 0 && client_jetty == URMA_DEMO_CLIENT_JETTY_ID)
+		return client_jetty_id;
+
+	return client_jetty;
+}
+
+static u32 urma_server_effective_server_jetty(void)
+{
+	return server_jetty;
+}
+
 /*
  * Create URMA resources (JFC, JFR, Jetty)
  */
@@ -216,7 +240,12 @@ static int urma_server_create_resources(struct urma_server_ctx *ctx)
 	jetty_cfg.flag.bs.share_jfr = 1;
 	jetty_cfg.trans_mode = UBCORE_TP_RM;
 	jetty_cfg.eid_index = ctx->eid_index;
-	jetty_cfg.id = URMA_DEMO_WELL_KNOWN_JETTY_ID;
+	jetty_cfg.id = urma_server_effective_server_jetty();
+	if (jetty_cfg.id == 0) {
+		pr_err("%s: server_jetty must be non-zero\n", URMA_SERVER_NAME);
+		ret = -EINVAL;
+		goto err_delete_jfr;
+	}
 	jetty_cfg.max_send_sge = 2; /* Need 2 for RDMA read (src/dst) */
 	jetty_cfg.max_recv_sge = 1;
 	jetty_cfg.rnr_retry = 7;
@@ -389,22 +418,27 @@ static int urma_server_import_client_seg(struct urma_server_ctx *ctx,
 	struct ubcore_target_seg_cfg seg_cfg = { 0 };
 	struct ubcore_tjetty_cfg tjetty_cfg;
 	char eid_str[64];
+	u32 client_jetty;
 
 	urma_demo_format_eid(msg->src_eid, eid_str, sizeof(eid_str));
 	pr_info("%s: Importing client segment: va=0x%llx, len=%u, eid=%s, jetty_id=%u\n",
 		URMA_SERVER_NAME, msg->seg_va, msg->seg_len, eid_str,
 		msg->src_jetty_id);
-	if (msg->src_jetty_id != URMA_DEMO_WELL_KNOWN_JETTY_ID) {
+	client_jetty = urma_server_effective_client_jetty();
+	if (client_jetty == 0) {
+		pr_err("%s: client_jetty must be non-zero\n", URMA_SERVER_NAME);
+		return -EINVAL;
+	}
+	if (msg->src_jetty_id != client_jetty) {
 		pr_err("%s: client jetty_id must be %u\n", URMA_SERVER_NAME,
-		       URMA_DEMO_WELL_KNOWN_JETTY_ID);
+		       client_jetty);
 		return -EINVAL;
 	}
 
 	/* Import client's jetty for sending reply (skip if already imported early) */
 	if (!ctx->client_tjetty) {
 		urma_server_init_tjetty_cfg(&tjetty_cfg, msg->src_eid,
-					    URMA_DEMO_WELL_KNOWN_JETTY_ID,
-					    ctx->eid_index);
+					    client_jetty, ctx->eid_index);
 
 		ctx->client_tjetty =
 			ubcore_import_jetty(ctx->ub_dev, &tjetty_cfg, NULL);
@@ -728,6 +762,7 @@ static int urma_server_import_client_jetty_early(struct urma_server_ctx *ctx)
 	struct ubcore_tjetty_cfg tjetty_cfg;
 	u8 eid_raw[URMA_DEMO_EID_SIZE];
 	char eid_str[64];
+	u32 client_jetty;
 	int ret;
 
 	/* Parse client EID from module parameter */
@@ -737,15 +772,14 @@ static int urma_server_import_client_jetty_early(struct urma_server_ctx *ctx)
 		       client_eid);
 		return ret;
 	}
-	if (client_jetty_id != URMA_DEMO_WELL_KNOWN_JETTY_ID) {
-		pr_err("%s: client_jetty_id must be %u\n", URMA_SERVER_NAME,
-		       URMA_DEMO_WELL_KNOWN_JETTY_ID);
+	client_jetty = urma_server_effective_client_jetty();
+	if (client_jetty == 0) {
+		pr_err("%s: client_jetty must be non-zero\n", URMA_SERVER_NAME);
 		return -EINVAL;
 	}
 
 	/* Configure target jetty */
-	urma_server_init_tjetty_cfg(&tjetty_cfg, eid_raw,
-				    URMA_DEMO_WELL_KNOWN_JETTY_ID,
+	urma_server_init_tjetty_cfg(&tjetty_cfg, eid_raw, client_jetty,
 				    ctx->eid_index);
 
 	ctx->client_tjetty =
@@ -761,7 +795,7 @@ static int urma_server_import_client_jetty_early(struct urma_server_ctx *ctx)
 
 	urma_demo_format_eid(eid_raw, eid_str, sizeof(eid_str));
 	pr_info("%s: Client jetty imported early (eid=%s, jetty_id=%u)\n",
-		URMA_SERVER_NAME, eid_str, client_jetty_id);
+		URMA_SERVER_NAME, eid_str, client_jetty);
 
 	return 0;
 }
@@ -810,7 +844,7 @@ static int urma_server_add_dev(struct ubcore_device *ub_dev)
 	}
 
 	/* Optionally import client jetty early if parameters are provided */
-	if (strlen(client_eid) > 0 && client_jetty_id != 0) {
+	if (strlen(client_eid) > 0) {
 		ret = urma_server_import_client_jetty_early(ctx);
 		if (ret) {
 			pr_warn("%s: early jetty import failed (%d), will import later from message\n",
