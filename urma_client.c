@@ -154,6 +154,23 @@ static int urma_client_select_eid_index(struct ubcore_device *ub_dev,
 	return -ENODEV;
 }
 
+static void urma_client_init_tjetty_cfg(struct ubcore_tjetty_cfg *cfg,
+					const u8 *eid, u32 jetty_id,
+					u32 eid_index)
+{
+	memset(cfg, 0, sizeof(*cfg));
+	memcpy(cfg->id.eid.raw, eid, URMA_DEMO_EID_SIZE);
+	cfg->id.id = jetty_id;
+	cfg->trans_mode = UBCORE_TP_RM;
+	cfg->eid_index = eid_index;
+	cfg->type = UBCORE_JETTY;
+	cfg->tp_type = UBCORE_RTP;
+	cfg->flag.bs.order_type = UBCORE_OL;
+	cfg->flag.bs.share_tp = 1;
+	cfg->flag.bs.token_policy = UBCORE_TOKEN_NONE;
+	cfg->token_value.token = 0;
+}
+
 /*
  * Create URMA resources (JFC, JFR, Jetty)
  */
@@ -351,7 +368,7 @@ err_delete_jfc:
  */
 static int urma_client_connect(struct urma_client_ctx *ctx)
 {
-	struct ubcore_tjetty_cfg tjetty_cfg = { 0 };
+	struct ubcore_tjetty_cfg tjetty_cfg;
 	char eid_str[64];
 
 	if (strlen(server_eid) == 0 || server_jetty_id == 0) {
@@ -372,12 +389,8 @@ static int urma_client_connect(struct urma_client_ctx *ctx)
 		URMA_CLIENT_NAME, eid_str, server_jetty_id);
 
 	/* Configure target jetty for import */
-	memcpy(tjetty_cfg.id.eid.raw, ctx->server_eid_raw, URMA_DEMO_EID_SIZE);
-	tjetty_cfg.id.id = server_jetty_id;
-	tjetty_cfg.trans_mode = UBCORE_TP_RM;
-	tjetty_cfg.eid_index = ctx->eid_index;
-	tjetty_cfg.type = UBCORE_JFR; /* For RM mode, target is JFR */
-	tjetty_cfg.flag.bs.token_policy = UBCORE_TOKEN_NONE;
+	urma_client_init_tjetty_cfg(&tjetty_cfg, ctx->server_eid_raw,
+				    server_jetty_id, ctx->eid_index);
 
 	/* Import server's jetty (for RM mode, this creates connection) */
 	ctx->tjetty = ubcore_import_jetty(ctx->ub_dev, &tjetty_cfg, NULL);
