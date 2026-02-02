@@ -382,7 +382,7 @@ static int urma_server_import_client_seg(struct urma_server_ctx *ctx,
 					 struct urma_demo_seg_info_msg *msg)
 {
 	struct ubcore_target_seg_cfg seg_cfg = { 0 };
-	struct ubcore_tjetty_cfg tjetty_cfg = { 0 };
+	struct ubcore_tjetty_cfg tjetty_cfg;
 	char eid_str[64];
 
 	urma_demo_format_eid(msg->src_eid, eid_str, sizeof(eid_str));
@@ -392,12 +392,8 @@ static int urma_server_import_client_seg(struct urma_server_ctx *ctx,
 
 	/* Import client's jetty for sending reply (skip if already imported early) */
 	if (!ctx->client_tjetty) {
-		memcpy(tjetty_cfg.id.eid.raw, msg->src_eid, URMA_DEMO_EID_SIZE);
-		tjetty_cfg.id.id = msg->src_jetty_id;
-		tjetty_cfg.trans_mode = UBCORE_TP_RM;
-		tjetty_cfg.eid_index = ctx->eid_index;
-		tjetty_cfg.type = UBCORE_JFR;
-		tjetty_cfg.flag.bs.token_policy = UBCORE_TOKEN_NONE;
+		urma_server_init_tjetty_cfg(&tjetty_cfg, msg->src_eid,
+					    msg->src_jetty_id, ctx->eid_index);
 
 		ctx->client_tjetty =
 			ubcore_import_jetty(ctx->ub_dev, &tjetty_cfg, NULL);
@@ -695,13 +691,30 @@ static const struct file_operations trigger_fops = {
 	.write = urma_server_trigger_write,
 };
 
+static void urma_server_init_tjetty_cfg(struct ubcore_tjetty_cfg *cfg,
+					const u8 *eid, u32 jetty_id,
+					u32 eid_index)
+{
+	memset(cfg, 0, sizeof(*cfg));
+	memcpy(cfg->id.eid.raw, eid, URMA_DEMO_EID_SIZE);
+	cfg->id.id = jetty_id;
+	cfg->trans_mode = UBCORE_TP_RM;
+	cfg->eid_index = eid_index;
+	cfg->type = UBCORE_JETTY;
+	cfg->tp_type = UBCORE_RTP;
+	cfg->flag.bs.order_type = UBCORE_OL;
+	cfg->flag.bs.share_tp = 1;
+	cfg->flag.bs.token_policy = UBCORE_TOKEN_NONE;
+	cfg->token_value.token = 0;
+}
+
 /*
  * Import client jetty early using module parameters
  * This allows bidirectional communication setup before any data exchange
  */
 static int urma_server_import_client_jetty_early(struct urma_server_ctx *ctx)
 {
-	struct ubcore_tjetty_cfg tjetty_cfg = { 0 };
+	struct ubcore_tjetty_cfg tjetty_cfg;
 	u8 eid_raw[URMA_DEMO_EID_SIZE];
 	char eid_str[64];
 	int ret;
@@ -715,12 +728,8 @@ static int urma_server_import_client_jetty_early(struct urma_server_ctx *ctx)
 	}
 
 	/* Configure target jetty */
-	memcpy(tjetty_cfg.id.eid.raw, eid_raw, URMA_DEMO_EID_SIZE);
-	tjetty_cfg.id.id = client_jetty_id;
-	tjetty_cfg.trans_mode = UBCORE_TP_RM;
-	tjetty_cfg.eid_index = ctx->eid_index;
-	tjetty_cfg.type = UBCORE_JFR;
-	tjetty_cfg.flag.bs.token_policy = UBCORE_TOKEN_NONE;
+	urma_server_init_tjetty_cfg(&tjetty_cfg, eid_raw, client_jetty_id,
+				    ctx->eid_index);
 
 	ctx->client_tjetty =
 		ubcore_import_jetty(ctx->ub_dev, &tjetty_cfg, NULL);
