@@ -23,6 +23,9 @@
 /* EID size */
 #define URMA_DEMO_EID_SIZE 16
 
+/* Well-known jetty id */
+#define URMA_DEMO_WELL_KNOWN_JETTY_ID 100
+
 /* Completion queue depth */
 #define URMA_DEMO_JFC_DEPTH 64
 #define URMA_DEMO_JFR_DEPTH 32
