@@ -763,7 +763,6 @@ static void urma_server_init_tjetty_cfg(struct ubcore_tjetty_cfg *cfg,
 	cfg->type = UBCORE_JETTY;
 	cfg->tp_type = UBCORE_RTP;
 	cfg->flag.bs.order_type = UBCORE_OL;
-	cfg->flag.bs.share_tp = 1;
 	cfg->flag.bs.token_policy = UBCORE_TOKEN_NONE;
 	cfg->token_value.token = 0;
 }
