@@ -5,7 +5,7 @@
  * This module demonstrates URMA kernel API usage as a server:
  * 1. Receives segment information from client
  * 2. Imports client's segment and performs RDMA read
- * 3. Sends reply with read data sample
+ * 3. Sends reply with read data sample and CRC32
  *
  * Copyright (c) 2024
  */
@@ -548,6 +548,7 @@ static int urma_server_send_reply(struct urma_server_ctx *ctx, u32 status,
 	struct ubcore_cr cr = { 0 };
 	int ret;
 	int copy_len;
+	u32 data_crc32 = 0;
 
 	/* Prepare reply message */
 	reply = (struct urma_demo_reply_msg *)ctx->send_buf;
@@ -561,10 +562,12 @@ static int urma_server_send_reply(struct urma_server_ctx *ctx, u32 status,
 	if (status == URMA_DEMO_STATUS_SUCCESS && bytes_read > 0) {
 		copy_len = min_t(int, bytes_read, URMA_DEMO_SAMPLE_DATA_SIZE);
 		memcpy(reply->sample_data, ctx->read_buf, copy_len);
+		data_crc32 = urma_demo_crc32(ctx->read_buf, bytes_read);
+		reply->data_crc32 = data_crc32;
 	}
 
-	pr_info("%s: Sending reply: status=%u, bytes_read=%u\n",
-		URMA_SERVER_NAME, status, bytes_read);
+	pr_info("%s: Sending reply: status=%u, bytes_read=%u, crc32=0x%08x\n",
+		URMA_SERVER_NAME, status, bytes_read, data_crc32);
 
 	/* Prepare send WR */
 	send_wr.opcode = UBCORE_OPC_SEND;

@@ -5,7 +5,7 @@
  * This module demonstrates URMA kernel API usage as a client:
  * 1. Registers a 4KB memory region
  * 2. Sends segment information to the server
- * 3. Waits for server to perform RDMA read and send reply
+ * 3. Waits for server to perform RDMA read and send CRC32 reply
  *
  * Copyright (c) 2024
  */
@@ -524,6 +524,7 @@ static int urma_client_wait_reply(struct urma_client_ctx *ctx)
 {
 	struct urma_demo_reply_msg *reply;
 	struct ubcore_cr cr = { 0 };
+	u32 expected_crc32;
 	int ret;
 
 	pr_info("%s: Waiting for reply from server...\n", URMA_CLIENT_NAME);
@@ -554,6 +555,8 @@ static int urma_client_wait_reply(struct urma_client_ctx *ctx)
 	if (reply->status == URMA_DEMO_STATUS_SUCCESS) {
 		pr_info("%s: Server successfully read %u bytes via RDMA\n",
 			URMA_CLIENT_NAME, reply->bytes_read);
+		pr_info("%s: Server CRC32: 0x%08x\n", URMA_CLIENT_NAME,
+			reply->data_crc32);
 		pr_info("%s: Sample data: %02x %02x %02x %02x %02x %02x %02x %02x\n",
 			URMA_CLIENT_NAME, reply->sample_data[0],
 			reply->sample_data[1], reply->sample_data[2],
@@ -561,15 +564,23 @@ static int urma_client_wait_reply(struct urma_client_ctx *ctx)
 			reply->sample_data[5], reply->sample_data[6],
 			reply->sample_data[7]);
 
-		/* Verify the sample data matches our pattern */
-		if (reply->sample_data[0] == URMA_DEMO_MAGIC_PATTERN) {
-			pr_info("%s: Data verification PASSED!\n",
-				URMA_CLIENT_NAME);
-		} else {
-			pr_warn("%s: Data verification FAILED - expected 0x%02x, got 0x%02x\n",
-				URMA_CLIENT_NAME, URMA_DEMO_MAGIC_PATTERN,
-				reply->sample_data[0]);
+		if (reply->bytes_read != URMA_DEMO_CLIENT_BUF_SIZE) {
+			pr_err("%s: Data verification FAILED - expected %u bytes, got %u\n",
+			       URMA_CLIENT_NAME, URMA_DEMO_CLIENT_BUF_SIZE,
+			       reply->bytes_read);
+			return -EIO;
 		}
+
+		expected_crc32 = urma_demo_crc32(ctx->data_buf, reply->bytes_read);
+		if (reply->data_crc32 != expected_crc32) {
+			pr_err("%s: Data verification FAILED - expected crc32=0x%08x, got 0x%08x\n",
+			       URMA_CLIENT_NAME, expected_crc32,
+			       reply->data_crc32);
+			return -EIO;
+		}
+
+		pr_info("%s: Data CRC32 verification PASSED!\n",
+			URMA_CLIENT_NAME);
 	} else {
 		pr_err("%s: Server reported error status: %u\n",
 		       URMA_CLIENT_NAME, reply->status);

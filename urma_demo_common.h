@@ -14,6 +14,7 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
+#include <linux/crc32.h>
 
 /* Buffer sizes */
 #define URMA_DEMO_CLIENT_BUF_SIZE 4096 /* 4KB client buffer for RDMA read */
@@ -76,9 +77,15 @@ struct urma_demo_reply_msg {
 	u8 reserved1[3]; /* Alignment padding */
 	u32 status; /* Operation status */
 	u32 bytes_read; /* Number of bytes read via RDMA */
+	u32 data_crc32; /* CRC32 of data read via RDMA */
 	u8 sample_data[URMA_DEMO_SAMPLE_DATA_SIZE]; /* First N bytes of read data */
-	u8 reserved2[52]; /* Padding to 128 bytes */
+	u8 reserved2[48]; /* Padding to 128 bytes */
 } __packed;
+
+static inline u32 urma_demo_crc32(const void *data, size_t len)
+{
+	return crc32_le((u32)~0U, data, len) ^ (u32)~0U;
+}
 
 /*
  * Helper to parse EID string (colon-separated hex) to raw bytes
