@@ -183,27 +183,47 @@ static int urma_client_get_dma_domain_token(struct urma_client_ctx *ctx,
 	u32 tid;
 	int ret = 0;
 
-	if (!ctx || !ctx->ub_dev || !ctx->ub_dev->dma_dev || !token)
+	if (!ctx || !token) {
+		pr_err("%s: invalid DMA-domain token arguments\n",
+		       URMA_CLIENT_NAME);
 		return -EINVAL;
+	}
+
+	if (!ctx->ub_dev || !ctx->ub_dev->dma_dev) {
+		pr_err("%s: URMA device has no DMA device for token lookup\n",
+		       URMA_CLIENT_NAME);
+		return -EINVAL;
+	}
 
 	dma_dev = ctx->ub_dev->dma_dev;
 	group = iommu_group_get(dma_dev);
-	if (!group)
+	if (!group) {
+		pr_err("%s: DMA device %s has no IOMMU group\n",
+		       URMA_CLIENT_NAME, dev_name(dma_dev));
 		return -ENODEV;
+	}
 
 	dma_domain = iommu_group_default_domain(group);
 	cur_domain = iommu_get_domain_for_dev(dma_dev);
 	if (!dma_domain || !cur_domain) {
+		pr_err("%s: DMA device %s missing IOMMU domain (default=%p, current=%p)\n",
+		       URMA_CLIENT_NAME, dev_name(dma_dev), dma_domain,
+		       cur_domain);
 		ret = -ENODEV;
 		goto out_put_group;
 	}
 
 	if (dma_domain != cur_domain) {
+		pr_err("%s: DMA device %s default domain %p differs from current domain %p\n",
+		       URMA_CLIENT_NAME, dev_name(dma_dev), dma_domain,
+		       cur_domain);
 		ret = -EXDEV;
 		goto out_put_group;
 	}
 
 	if (!dma_domain->ops || !dma_domain->ops->map_pages) {
+		pr_err("%s: DMA device %s domain does not support page mappings\n",
+		       URMA_CLIENT_NAME, dev_name(dma_dev));
 		ret = -EOPNOTSUPP;
 		goto out_put_group;
 	}
@@ -211,6 +231,8 @@ static int urma_client_get_dma_domain_token(struct urma_client_ctx *ctx,
 	base = to_ummu_base_domain(dma_domain);
 	tid = base->tid;
 	if (tid == UMMU_NO_TID || tid == UMMU_INVALID_TID) {
+		pr_err("%s: DMA device %s domain has invalid TID %u\n",
+		       URMA_CLIENT_NAME, dev_name(dma_dev), tid);
 		ret = -EOPNOTSUPP;
 		goto out_put_group;
 	}
