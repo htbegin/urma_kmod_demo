@@ -58,7 +58,7 @@
 struct urma_demo_seg_info_msg {
 	u8 msg_type; /* URMA_DEMO_MSG_TYPE_SEG_INFO */
 	u8 reserved1[3]; /* Alignment padding */
-	u64 seg_va; /* Virtual address of registered segment */
+	u64 seg_va; /* DMA-mapped UBVA of client data */
 	u32 seg_len; /* Length of client data to read */
 	u32 token; /* Segment access token */
 	u32 token_id; /* Token ID */

@@ -452,6 +452,7 @@ static int urma_server_import_client_seg(struct urma_server_ctx *ctx,
 	seg_cfg.seg.token_id = msg->token_id;
 	seg_cfg.token_value.token = msg->token;
 	seg_cfg.flag.bs.access = UBCORE_ACCESS_READ;
+	seg_cfg.flag.bs.mapping = UBCORE_SEG_NOMAP;
 
 	ctx->client_seg = ubcore_import_seg(ctx->ub_dev, &seg_cfg, NULL);
 	if (IS_ERR_OR_NULL(ctx->client_seg)) {

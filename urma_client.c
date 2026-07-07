@@ -15,6 +15,8 @@
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
+#include <linux/scatterlist.h>
+#include <linux/dma-mapping.h>
 #include <linux/delay.h>
 #include <linux/random.h>
 #include <linux/inet.h>
@@ -25,6 +27,7 @@
 #include "urma_demo_common.h"
 
 #define URMA_CLIENT_NAME "urma_demo_client"
+#define URMA_CLIENT_DATA_PAGE_COUNT (URMA_DEMO_CLIENT_BUF_SIZE / PAGE_SIZE)
 
 /* Module parameters */
 static char *server_eid = "";
@@ -73,6 +76,12 @@ struct urma_client_ctx {
 	/* Buffers */
 	struct page *data_pages; /* Page-backed buffer for RDMA read */
 	void *data_buf; /* 16KB buffer for RDMA read */
+	struct sg_table data_sgt;
+	struct scatterlist data_sgl[URMA_CLIENT_DATA_PAGE_COUNT];
+	bool data_dma_mapped;
+	dma_addr_t data_dma_addr;
+	u32 data_dma_len;
+	u32 data_crc32;
 	void *send_buf; /* Send message buffer */
 	void *recv_buf; /* Receive buffer for reply */
 	struct ubcore_target_seg *send_seg;
@@ -90,14 +99,74 @@ struct urma_client_ctx {
 
 static struct urma_client_ctx g_client_ctx;
 
+static void urma_client_unmap_data_sgt(struct urma_client_ctx *ctx)
+{
+	if (!ctx->data_dma_mapped)
+		return;
+
+	dma_unmap_sgtable(ctx->ub_dev->dma_dev, &ctx->data_sgt, DMA_TO_DEVICE, 0);
+	ctx->data_dma_mapped = false;
+	ctx->data_dma_addr = 0;
+	ctx->data_dma_len = 0;
+}
+
 static void urma_client_free_data_pages(struct urma_client_ctx *ctx)
 {
+	urma_client_unmap_data_sgt(ctx);
+
 	if (ctx->data_pages)
 		__free_pages(ctx->data_pages,
 			     get_order(PAGE_ALIGN(URMA_DEMO_CLIENT_BUF_SIZE)));
 
 	ctx->data_pages = NULL;
 	ctx->data_buf = NULL;
+}
+
+static int urma_client_map_data_sgt(struct urma_client_ctx *ctx, size_t len)
+{
+	size_t remaining = len;
+	int ret;
+	int i;
+
+	if (!ctx->ub_dev->dma_dev)
+		return -ENODEV;
+
+	sg_init_table(ctx->data_sgl, URMA_CLIENT_DATA_PAGE_COUNT);
+	for (i = 0; i < URMA_CLIENT_DATA_PAGE_COUNT; i++) {
+		unsigned int page_len = min_t(size_t, remaining, PAGE_SIZE);
+
+		sg_set_page(&ctx->data_sgl[i], nth_page(ctx->data_pages, i),
+			    page_len, 0);
+		remaining -= page_len;
+	}
+
+	ctx->data_sgt.sgl = ctx->data_sgl;
+	ctx->data_sgt.orig_nents = URMA_CLIENT_DATA_PAGE_COUNT;
+	ctx->data_sgt.nents = URMA_CLIENT_DATA_PAGE_COUNT;
+
+	ret = dma_map_sgtable(ctx->ub_dev->dma_dev, &ctx->data_sgt,
+			      DMA_TO_DEVICE, 0);
+	if (ret) {
+		pr_err("%s: failed to DMA map data sgtable: %d\n",
+		       URMA_CLIENT_NAME, ret);
+		return ret;
+	}
+	ctx->data_dma_mapped = true;
+
+	if (ctx->data_sgt.nents != 1 || sg_dma_len(ctx->data_sgt.sgl) != len) {
+		pr_err("%s: DMA sgtable did not map to one %zu-byte segment (nents=%u, len=%u)\n",
+		       URMA_CLIENT_NAME, len, ctx->data_sgt.nents,
+		       sg_dma_len(ctx->data_sgt.sgl));
+		urma_client_unmap_data_sgt(ctx);
+		return -ERANGE;
+	}
+
+	ctx->data_dma_addr = sg_dma_address(ctx->data_sgt.sgl);
+	ctx->data_dma_len = sg_dma_len(ctx->data_sgt.sgl);
+
+	pr_info("%s: Data sgtable DMA mapped, ubva=%pad, len=%u\n",
+		URMA_CLIENT_NAME, &ctx->data_dma_addr, ctx->data_dma_len);
+	return 0;
 }
 
 /*
@@ -299,6 +368,8 @@ static int urma_client_create_resources(struct urma_client_ctx *ctx)
 	/* Fill buffer with magic pattern for verification */
 	memset(ctx->data_buf, URMA_DEMO_MAGIC_PATTERN,
 	       URMA_DEMO_CLIENT_BUF_SIZE);
+	ctx->data_crc32 = urma_demo_crc32(ctx->data_buf,
+					  URMA_DEMO_CLIENT_BUF_SIZE);
 
 	/* Register data buffer as segment */
 	seg_cfg.va = (u64)ctx->data_buf;
@@ -319,6 +390,10 @@ static int urma_client_create_resources(struct urma_client_ctx *ctx)
 	pr_info("%s: Data segment registered, va=0x%llx, len=%llu, token=0x%x\n",
 		URMA_CLIENT_NAME, ctx->local_seg->seg.ubva.va,
 		ctx->local_seg->seg.len, seg_cfg.token_value.token);
+
+	ret = urma_client_map_data_sgt(ctx, data_buf_len);
+	if (ret)
+		goto err_unreg_data_seg;
 
 	/* Allocate and register send buffer */
 	ctx->send_buf = kzalloc(msg_buf_len, GFP_KERNEL);
@@ -492,14 +567,14 @@ static int urma_client_send_seg_info(struct urma_client_ctx *ctx)
 	memset(msg, 0, sizeof(*msg));
 
 	msg->msg_type = URMA_DEMO_MSG_TYPE_SEG_INFO;
-	msg->seg_va = ctx->local_seg->seg.ubva.va;
+	msg->seg_va = ctx->data_dma_addr;
 	msg->seg_len = URMA_DEMO_CLIENT_BUF_SIZE;
 	msg->token = 0; /* Token disabled */
 	msg->token_id = ctx->local_seg->seg.token_id;
 	memcpy(msg->src_eid, ctx->jetty->jetty_id.eid.raw, URMA_DEMO_EID_SIZE);
 	msg->src_jetty_id = ctx->jetty->jetty_id.id;
 
-	pr_info("%s: Sending seg info: va=0x%llx, len=%u, jetty_id=%u\n",
+	pr_info("%s: Sending seg info: dma_ubva=0x%llx, len=%u, jetty_id=%u\n",
 		URMA_CLIENT_NAME, msg->seg_va, msg->seg_len, msg->src_jetty_id);
 
 	/* Prepare send WR */
@@ -589,7 +664,7 @@ static int urma_client_wait_reply(struct urma_client_ctx *ctx)
 			return -EIO;
 		}
 
-		expected_crc32 = urma_demo_crc32(ctx->data_buf, reply->bytes_read);
+		expected_crc32 = ctx->data_crc32;
 		if (reply->data_crc32 != expected_crc32) {
 			pr_err("%s: Data verification FAILED - expected crc32=0x%08x, got 0x%08x\n",
 			       URMA_CLIENT_NAME, expected_crc32,
