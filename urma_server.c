@@ -10,6 +10,8 @@
  * Copyright (c) 2024
  */
 
+#define pr_fmt(fmt) "server: " fmt
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
