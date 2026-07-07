@@ -8,8 +8,8 @@ The demo consists of two kernel modules:
 
 | Module | Description |
 |--------|-------------|
-| `urma_demo_server.ko` | Server that receives segment info, performs RDMA READ, and returns CRC32 |
-| `urma_demo_client.ko` | Client that registers memory, sends segment info, and verifies CRC32 |
+| `urma_demo_server.ko` | Server that imports the DMA-mapped UBVA, performs RDMA READ, and returns CRC32 |
+| `urma_demo_client.ko` | Client that DMA-maps source pages, sends segment info, and verifies CRC32 |
 
 ### Communication Flow
 
@@ -20,8 +20,9 @@ CLIENT (Machine A)                     SERVER (Machine B)
    server_eid, server_jetty               (prints EID & jetty_id)
 2. Register 16KB buffer                2. Trigger to wait for client
    (filled with 0xDE pattern)
-3. SEND seg_info ----------------------> 3. RECV seg_info
-                                        4. Import client's segment
+3. DMA-map page sgtable
+4. SEND seg_info ----------------------> 3. RECV seg_info
+                                        4. Import client's DMA-mapped UBVA
                   <---- RDMA READ ----- 5. RDMA READ client's 16KB buffer
 5. RECV reply <------------------------ 6. SEND reply with sample data + CRC32
 6. Verify bytes_read and CRC32
@@ -222,12 +223,12 @@ This demo uses RM (Reliable Message) transport mode, which provides:
 
 ### Memory Registration
 
-The client registers a 16KB buffer filled with magic pattern (0xDE) using `ubcore_register_seg()`. The source buffer is allocated with `alloc_pages()`. The server imports this segment using `ubcore_import_seg()` with the token received from the client. After RDMA READ completes, the server computes CRC32 over the read data and returns it to the client for full-buffer verification.
+The client allocates a 16KB source buffer with `alloc_pages()` and fills it with magic pattern (0xDE). It builds a page `sg_table`, maps it with `dma_map_sgtable()`, validates that DMA mapping produced one 16KB segment, and sends `sg_dma_address()` as the remote-visible UBVA. The server imports that DMA-mapped UBVA using `ubcore_import_seg()`. After RDMA READ completes, the server computes CRC32 over the read data and returns it to the client for full-buffer verification.
 
 ### RDMA Operations
 
 1. **SEND/RECV**: Used for exchanging segment info and CRC32 reply messages
-2. **RDMA READ**: Server reads client's registered memory without CPU involvement on client side
+2. **RDMA READ**: Server reads the client's DMA-mapped source pages without CPU involvement on client side
 
 ## File Structure
 
