@@ -8,8 +8,8 @@ The demo consists of two kernel modules:
 
 | Module | Description |
 |--------|-------------|
-| `urma_demo_server.ko` | Server that receives segment info and performs RDMA READ |
-| `urma_demo_client.ko` | Client that registers memory and sends segment info to server |
+| `urma_demo_server.ko` | Server that receives segment info, performs RDMA READ, and returns CRC32 |
+| `urma_demo_client.ko` | Client that registers memory, sends segment info, and verifies CRC32 |
 
 ### Communication Flow
 
@@ -23,8 +23,8 @@ CLIENT (Machine A)                     SERVER (Machine B)
 3. SEND seg_info ----------------------> 3. RECV seg_info
                                         4. Import client's segment
                   <---- RDMA READ ----- 5. RDMA READ client's 4KB buffer
-5. RECV reply <------------------------ 6. SEND reply with sample data
-6. Verify sample data matches 0xDE
+5. RECV reply <------------------------ 6. SEND reply with sample data + CRC32
+6. Verify bytes_read and CRC32
 ```
 
 ## Prerequisites
@@ -116,16 +116,18 @@ Expected log output on client:
 ```
 urma_demo_client: Registered memory segment, VA=0x..., token=...
 urma_demo_client: Sent segment info to server
-urma_demo_client: Received reply - status=0, bytes_read=4096
-urma_demo_client: Sample data verification: SUCCESS
+urma_demo_client: Server successfully read 4096 bytes via RDMA
+urma_demo_client: Server CRC32: 0x...
+urma_demo_client: Data CRC32 verification PASSED!
 ```
 
 Expected log output on server:
 ```
 urma_demo_server: Received segment info from client
 urma_demo_server: Imported client segment, VA=0x...
-urma_demo_server: RDMA READ completed, 4096 bytes
-urma_demo_server: Sent reply to client
+urma_demo_server: RDMA read completed successfully, read 4096 bytes
+urma_demo_server: Sending reply: status=0, bytes_read=4096, crc32=0x...
+urma_demo_server: Reply sent successfully
 ```
 
 ### Step 5: Unload Modules
@@ -220,11 +222,11 @@ This demo uses RM (Reliable Message) transport mode, which provides:
 
 ### Memory Registration
 
-The client registers a 4KB buffer filled with magic pattern (0xDE) using `ubcore_register_seg()`. The server imports this segment using `ubcore_import_seg()` with the token received from the client.
+The client registers a 4KB buffer filled with magic pattern (0xDE) using `ubcore_register_seg()`. The server imports this segment using `ubcore_import_seg()` with the token received from the client. After RDMA READ completes, the server computes CRC32 over the read data and returns it to the client for full-buffer verification.
 
 ### RDMA Operations
 
-1. **SEND/RECV**: Used for exchanging segment info and reply messages
+1. **SEND/RECV**: Used for exchanging segment info and CRC32 reply messages
 2. **RDMA READ**: Server reads client's registered memory without CPU involvement on client side
 
 ## File Structure
