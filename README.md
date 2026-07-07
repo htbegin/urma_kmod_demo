@@ -18,11 +18,11 @@ CLIENT (Machine A)                     SERVER (Machine B)
 ---------------------                  ---------------------
 1. Load module with                    1. Load module
    server_eid, server_jetty               (prints EID & jetty_id)
-2. Register 4KB buffer                 2. Trigger to wait for client
+2. Register 16KB buffer                2. Trigger to wait for client
    (filled with 0xDE pattern)
 3. SEND seg_info ----------------------> 3. RECV seg_info
                                         4. Import client's segment
-                  <---- RDMA READ ----- 5. RDMA READ client's 4KB buffer
+                  <---- RDMA READ ----- 5. RDMA READ client's 16KB buffer
 5. RECV reply <------------------------ 6. SEND reply with sample data + CRC32
 6. Verify bytes_read and CRC32
 ```
@@ -116,7 +116,7 @@ Expected log output on client:
 ```
 urma_demo_client: Registered memory segment, VA=0x..., token=...
 urma_demo_client: Sent segment info to server
-urma_demo_client: Server successfully read 4096 bytes via RDMA
+urma_demo_client: Server successfully read 16384 bytes via RDMA
 urma_demo_client: Server CRC32: 0x...
 urma_demo_client: Data CRC32 verification PASSED!
 ```
@@ -125,8 +125,8 @@ Expected log output on server:
 ```
 urma_demo_server: Received segment info from client
 urma_demo_server: Imported client segment, VA=0x...
-urma_demo_server: RDMA read completed successfully, read 4096 bytes
-urma_demo_server: Sending reply: status=0, bytes_read=4096, crc32=0x...
+urma_demo_server: RDMA read completed successfully, read 16384 bytes
+urma_demo_server: Sending reply: status=0, bytes_read=16384, crc32=0x...
 urma_demo_server: Reply sent successfully
 ```
 
@@ -222,7 +222,7 @@ This demo uses RM (Reliable Message) transport mode, which provides:
 
 ### Memory Registration
 
-The client registers a 4KB buffer filled with magic pattern (0xDE) using `ubcore_register_seg()`. The server imports this segment using `ubcore_import_seg()` with the token received from the client. After RDMA READ completes, the server computes CRC32 over the read data and returns it to the client for full-buffer verification.
+The client registers a 16KB buffer filled with magic pattern (0xDE) using `ubcore_register_seg()`. The source buffer is allocated with `alloc_pages()`. The server imports this segment using `ubcore_import_seg()` with the token received from the client. After RDMA READ completes, the server computes CRC32 over the read data and returns it to the client for full-buffer verification.
 
 ### RDMA Operations
 
