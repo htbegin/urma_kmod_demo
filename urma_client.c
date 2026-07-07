@@ -17,12 +17,15 @@
 #include <linux/mm.h>
 #include <linux/scatterlist.h>
 #include <linux/dma-mapping.h>
+#include <linux/iommu.h>
+#include <linux/ummu_core.h>
 #include <linux/delay.h>
 #include <linux/random.h>
 #include <linux/inet.h>
 
 #include <ub/urma/ubcore_types.h>
 #include <ub/urma/ubcore_uapi.h>
+#include <uapi/ub/urma/udma/udma_abi.h>
 
 #include "urma_demo_common.h"
 
@@ -67,7 +70,6 @@ struct urma_client_ctx {
 	struct ubcore_jfc *jfc;
 	struct ubcore_jfr *jfr;
 	struct ubcore_jetty *jetty;
-	struct ubcore_target_seg *local_seg;
 
 	/* Remote connection */
 	struct ubcore_tjetty *tjetty;
@@ -81,6 +83,7 @@ struct urma_client_ctx {
 	bool data_dma_mapped;
 	dma_addr_t data_dma_addr;
 	u32 data_dma_len;
+	u32 data_dma_token;
 	u32 data_crc32;
 	void *send_buf; /* Send message buffer */
 	void *recv_buf; /* Receive buffer for reply */
@@ -167,6 +170,56 @@ static int urma_client_map_data_sgt(struct urma_client_ctx *ctx, size_t len)
 	pr_info("%s: Data sgtable DMA mapped, ubva=%pad, len=%u\n",
 		URMA_CLIENT_NAME, &ctx->data_dma_addr, ctx->data_dma_len);
 	return 0;
+}
+
+static int urma_client_get_dma_domain_token(struct urma_client_ctx *ctx,
+					    u32 *token)
+{
+	struct device *dma_dev;
+	struct iommu_group *group;
+	struct iommu_domain *dma_domain;
+	struct iommu_domain *cur_domain;
+	struct ummu_base_domain *base;
+	u32 tid;
+	int ret = 0;
+
+	if (!ctx || !ctx->ub_dev || !ctx->ub_dev->dma_dev || !token)
+		return -EINVAL;
+
+	dma_dev = ctx->ub_dev->dma_dev;
+	group = iommu_group_get(dma_dev);
+	if (!group)
+		return -ENODEV;
+
+	dma_domain = iommu_group_default_domain(group);
+	cur_domain = iommu_get_domain_for_dev(dma_dev);
+	if (!dma_domain || !cur_domain) {
+		ret = -ENODEV;
+		goto out_put_group;
+	}
+
+	if (dma_domain != cur_domain) {
+		ret = -EXDEV;
+		goto out_put_group;
+	}
+
+	if (!dma_domain->ops || !dma_domain->ops->map_pages) {
+		ret = -EOPNOTSUPP;
+		goto out_put_group;
+	}
+
+	base = to_ummu_base_domain(dma_domain);
+	tid = base->tid;
+	if (tid == UMMU_NO_TID || tid == UMMU_INVALID_TID) {
+		ret = -EOPNOTSUPP;
+		goto out_put_group;
+	}
+
+	*token = tid << UDMA_TID_SHIFT;
+
+out_put_group:
+	iommu_group_put(group);
+	return ret;
 }
 
 /*
@@ -346,7 +399,7 @@ static int urma_client_create_resources(struct urma_client_ctx *ctx)
 	data_buf_len = PAGE_ALIGN(URMA_DEMO_CLIENT_BUF_SIZE);
 	msg_buf_len = ALIGN(URMA_DEMO_MSG_BUF_SIZE, 4096);
 
-	/* Allocate and register page-backed data buffer for RDMA read */
+	/* Allocate page-backed data buffer for RDMA read */
 	ctx->data_pages = alloc_pages(GFP_KERNEL | __GFP_ZERO,
 				      get_order(data_buf_len));
 	if (!ctx->data_pages) {
@@ -371,35 +424,28 @@ static int urma_client_create_resources(struct urma_client_ctx *ctx)
 	ctx->data_crc32 = urma_demo_crc32(ctx->data_buf,
 					  URMA_DEMO_CLIENT_BUF_SIZE);
 
-	/* Register data buffer as segment */
-	seg_cfg.va = (u64)ctx->data_buf;
-	seg_cfg.len = data_buf_len;
+	ret = urma_client_map_data_sgt(ctx, data_buf_len);
+	if (ret)
+		goto err_free_data_buf;
+
+	ret = urma_client_get_dma_domain_token(ctx, &ctx->data_dma_token);
+	if (ret) {
+		pr_err("%s: failed to get DMA-domain token: %d\n",
+		       URMA_CLIENT_NAME, ret);
+		goto err_free_data_buf;
+	}
+	pr_info("%s: DMA data token=0x%x\n", URMA_CLIENT_NAME,
+		ctx->data_dma_token);
+
 	seg_cfg.flag.bs.token_policy = UBCORE_TOKEN_NONE;
 	seg_cfg.flag.bs.access = UBCORE_ACCESS_READ | UBCORE_ACCESS_WRITE;
 	seg_cfg.eid_index = ctx->eid_index;
-	get_random_bytes(&seg_cfg.token_value.token,
-			 sizeof(seg_cfg.token_value.token));
-
-	ctx->local_seg = ubcore_register_seg(ctx->ub_dev, &seg_cfg, NULL);
-	if (IS_ERR_OR_NULL(ctx->local_seg)) {
-		pr_err("%s: failed to register data segment\n",
-		       URMA_CLIENT_NAME);
-		ret = PTR_ERR(ctx->local_seg);
-		goto err_free_data_buf;
-	}
-	pr_info("%s: Data segment registered, va=0x%llx, len=%llu, token=0x%x\n",
-		URMA_CLIENT_NAME, ctx->local_seg->seg.ubva.va,
-		ctx->local_seg->seg.len, seg_cfg.token_value.token);
-
-	ret = urma_client_map_data_sgt(ctx, data_buf_len);
-	if (ret)
-		goto err_unreg_data_seg;
 
 	/* Allocate and register send buffer */
 	ctx->send_buf = kzalloc(msg_buf_len, GFP_KERNEL);
 	if (!ctx->send_buf) {
 		ret = -ENOMEM;
-		goto err_unreg_data_seg;
+		goto err_free_data_buf;
 	}
 	if (!IS_ALIGNED((unsigned long)ctx->send_buf, 4096)) {
 		pr_err("%s: send buffer is not 4KB aligned\n",
@@ -465,8 +511,6 @@ err_unreg_send_seg:
 	ubcore_unregister_seg(ctx->send_seg);
 err_free_send_buf:
 	kfree(ctx->send_buf);
-err_unreg_data_seg:
-	ubcore_unregister_seg(ctx->local_seg);
 err_free_data_buf:
 	urma_client_free_data_pages(ctx);
 err_delete_jetty:
@@ -570,12 +614,13 @@ static int urma_client_send_seg_info(struct urma_client_ctx *ctx)
 	msg->seg_va = ctx->data_dma_addr;
 	msg->seg_len = URMA_DEMO_CLIENT_BUF_SIZE;
 	msg->token = 0; /* Token disabled */
-	msg->token_id = ctx->local_seg->seg.token_id;
+	msg->token_id = ctx->data_dma_token;
 	memcpy(msg->src_eid, ctx->jetty->jetty_id.eid.raw, URMA_DEMO_EID_SIZE);
 	msg->src_jetty_id = ctx->jetty->jetty_id.id;
 
-	pr_info("%s: Sending seg info: dma_ubva=0x%llx, len=%u, jetty_id=%u\n",
-		URMA_CLIENT_NAME, msg->seg_va, msg->seg_len, msg->src_jetty_id);
+	pr_info("%s: Sending seg info: dma_ubva=0x%llx, len=%u, token_id=0x%x, jetty_id=%u\n",
+		URMA_CLIENT_NAME, msg->seg_va, msg->seg_len, msg->token_id,
+		msg->src_jetty_id);
 
 	/* Prepare send WR */
 	send_wr.opcode = UBCORE_OPC_SEND;
@@ -812,8 +857,6 @@ static void urma_client_remove_dev(struct ubcore_device *ub_dev,
 		ubcore_unregister_seg(ctx->send_seg);
 	if (ctx->send_buf)
 		kfree(ctx->send_buf);
-	if (ctx->local_seg)
-		ubcore_unregister_seg(ctx->local_seg);
 	urma_client_free_data_pages(ctx);
 	if (ctx->jetty)
 		ubcore_delete_jetty(ctx->jetty);
