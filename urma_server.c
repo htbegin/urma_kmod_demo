@@ -205,7 +205,7 @@ static int urma_server_create_resources(struct urma_server_ctx *ctx)
 	ctx->jfc = ubcore_create_jfc(ctx->ub_dev, &jfc_cfg, NULL, NULL, NULL);
 	if (IS_ERR_OR_NULL(ctx->jfc)) {
 		pr_err("%s: failed to create JFC\n", URMA_SERVER_NAME);
-		return PTR_ERR(ctx->jfc);
+		return urma_demo_ptr_err_or(ctx->jfc, -ENOMEM);
 	}
 	pr_info("%s: JFC created, id=%u\n", URMA_SERVER_NAME, ctx->jfc->id);
 
@@ -221,7 +221,7 @@ static int urma_server_create_resources(struct urma_server_ctx *ctx)
 	ctx->jfr = ubcore_create_jfr(ctx->ub_dev, &jfr_cfg, NULL, NULL);
 	if (IS_ERR_OR_NULL(ctx->jfr)) {
 		pr_err("%s: failed to create JFR\n", URMA_SERVER_NAME);
-		ret = PTR_ERR(ctx->jfr);
+		ret = urma_demo_ptr_err_or(ctx->jfr, -ENOMEM);
 		goto err_delete_jfc;
 	}
 	pr_info("%s: JFR created, id=%u\n", URMA_SERVER_NAME,
@@ -250,7 +250,7 @@ static int urma_server_create_resources(struct urma_server_ctx *ctx)
 	ctx->jetty = ubcore_create_jetty(ctx->ub_dev, &jetty_cfg, NULL, NULL);
 	if (IS_ERR_OR_NULL(ctx->jetty)) {
 		pr_err("%s: failed to create jetty\n", URMA_SERVER_NAME);
-		ret = PTR_ERR(ctx->jetty);
+		ret = urma_demo_ptr_err_or(ctx->jetty, -ENOMEM);
 		goto err_delete_jfr;
 	}
 
@@ -288,7 +288,7 @@ static int urma_server_create_resources(struct urma_server_ctx *ctx)
 	if (IS_ERR_OR_NULL(ctx->recv_seg)) {
 		pr_err("%s: failed to register recv segment\n",
 		       URMA_SERVER_NAME);
-		ret = PTR_ERR(ctx->recv_seg);
+		ret = urma_demo_ptr_err_or(ctx->recv_seg, -ENOMEM);
 		goto err_free_recv_buf;
 	}
 
@@ -314,7 +314,7 @@ static int urma_server_create_resources(struct urma_server_ctx *ctx)
 	if (IS_ERR_OR_NULL(ctx->send_seg)) {
 		pr_err("%s: failed to register send segment\n",
 		       URMA_SERVER_NAME);
-		ret = PTR_ERR(ctx->send_seg);
+		ret = urma_demo_ptr_err_or(ctx->send_seg, -ENOMEM);
 		goto err_free_send_buf;
 	}
 
@@ -340,7 +340,7 @@ static int urma_server_create_resources(struct urma_server_ctx *ctx)
 	if (IS_ERR_OR_NULL(ctx->read_seg)) {
 		pr_err("%s: failed to register read segment\n",
 		       URMA_SERVER_NAME);
-		ret = PTR_ERR(ctx->read_seg);
+		ret = urma_demo_ptr_err_or(ctx->read_seg, -ENOMEM);
 		goto err_free_read_buf;
 	}
 
@@ -412,6 +412,7 @@ static int urma_server_import_client_seg(struct urma_server_ctx *ctx,
 	struct ubcore_tjetty_cfg tjetty_cfg;
 	char eid_str[64];
 	u32 client_jetty;
+	int ret;
 
 	urma_demo_format_eid(msg->src_eid, eid_str, sizeof(eid_str));
 	pr_info("%s: Importing client segment: va=0x%llx, len=%u, eid=%s, jetty_id=%u\n",
@@ -436,9 +437,12 @@ static int urma_server_import_client_seg(struct urma_server_ctx *ctx,
 		ctx->client_tjetty =
 			ubcore_import_jetty(ctx->ub_dev, &tjetty_cfg, NULL);
 		if (IS_ERR_OR_NULL(ctx->client_tjetty)) {
-			pr_err("%s: failed to import client jetty\n",
-			       URMA_SERVER_NAME);
-			return PTR_ERR(ctx->client_tjetty);
+			ret = urma_demo_ptr_err_or(ctx->client_tjetty,
+						   -ENODEV);
+			pr_err("%s: failed to import client jetty: %d\n",
+			       URMA_SERVER_NAME, ret);
+			ctx->client_tjetty = NULL;
+			return ret;
 		}
 		pr_info("%s: Client jetty imported successfully\n",
 			URMA_SERVER_NAME);
@@ -458,14 +462,16 @@ static int urma_server_import_client_seg(struct urma_server_ctx *ctx,
 
 	ctx->client_seg = ubcore_import_seg(ctx->ub_dev, &seg_cfg, NULL);
 	if (IS_ERR_OR_NULL(ctx->client_seg)) {
-		pr_err("%s: failed to import client segment\n",
-		       URMA_SERVER_NAME);
+		ret = urma_demo_ptr_err_or(ctx->client_seg, -ENODEV);
+		pr_err("%s: failed to import client segment: %d\n",
+		       URMA_SERVER_NAME, ret);
 		/* Only unimport jetty if not early-imported */
 		if (!ctx->jetty_imported_early && ctx->client_tjetty) {
 			ubcore_unimport_jetty(ctx->client_tjetty);
 			ctx->client_tjetty = NULL;
 		}
-		return PTR_ERR(ctx->client_seg);
+		ctx->client_seg = NULL;
+		return ret;
 	}
 
 	/* Setup remote SGE for RDMA read */
@@ -489,6 +495,12 @@ static int urma_server_rdma_read(struct urma_server_ctx *ctx)
 
 	pr_info("%s: Performing RDMA read from client memory...\n",
 		URMA_SERVER_NAME);
+
+	if (!ctx->client_tjetty || !ctx->client_seg) {
+		pr_err("%s: cannot post RDMA read: client jetty or segment is missing\n",
+		       URMA_SERVER_NAME);
+		return -ENOTCONN;
+	}
 
 	/* Prepare RDMA READ work request */
 	read_wr.opcode = UBCORE_OPC_READ;
@@ -571,6 +583,12 @@ static int urma_server_send_reply(struct urma_server_ctx *ctx, u32 status,
 
 	pr_info("%s: Sending reply: status=%u, bytes_read=%u, crc32=0x%08x\n",
 		URMA_SERVER_NAME, status, bytes_read, data_crc32);
+
+	if (!ctx->client_tjetty) {
+		pr_err("%s: cannot send reply: client jetty is not connected\n",
+		       URMA_SERVER_NAME);
+		return -ENOTCONN;
+	}
 
 	/* Prepare send WR */
 	send_wr.opcode = UBCORE_OPC_SEND;
@@ -782,10 +800,11 @@ static int urma_server_import_client_jetty_early(struct urma_server_ctx *ctx)
 	ctx->client_tjetty =
 		ubcore_import_jetty(ctx->ub_dev, &tjetty_cfg, NULL);
 	if (IS_ERR_OR_NULL(ctx->client_tjetty)) {
-		pr_err("%s: failed to import client jetty early\n",
-		       URMA_SERVER_NAME);
+		ret = urma_demo_ptr_err_or(ctx->client_tjetty, -ENODEV);
+		pr_err("%s: failed to import client jetty early: %d\n",
+		       URMA_SERVER_NAME, ret);
 		ctx->client_tjetty = NULL;
-		return PTR_ERR(ctx->client_tjetty);
+		return ret;
 	}
 
 	ctx->jetty_imported_early = true;

@@ -13,6 +13,7 @@
 
 #include <linux/types.h>
 #include <linux/kernel.h>
+#include <linux/err.h>
 #include <linux/string.h>
 #include <linux/crc32.h>
 
@@ -85,6 +86,11 @@ struct urma_demo_reply_msg {
 static inline u32 urma_demo_crc32(const void *data, size_t len)
 {
 	return crc32_le((u32)~0U, data, len) ^ (u32)~0U;
+}
+
+static inline int urma_demo_ptr_err_or(const void *ptr, int null_err)
+{
+	return IS_ERR(ptr) ? PTR_ERR(ptr) : null_err;
 }
 
 /*
