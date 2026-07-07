@@ -3,7 +3,7 @@
  * URMA Kernel Module Demo - Client
  *
  * This module demonstrates URMA kernel API usage as a client:
- * 1. Registers a 4KB memory region
+ * 1. Registers a 16KB memory region
  * 2. Sends segment information to the server
  * 3. Waits for server to perform RDMA read and send CRC32 reply
  *
@@ -14,6 +14,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/mm.h>
 #include <linux/delay.h>
 #include <linux/random.h>
 #include <linux/inet.h>
@@ -70,7 +71,8 @@ struct urma_client_ctx {
 	u8 server_eid_raw[URMA_DEMO_EID_SIZE];
 
 	/* Buffers */
-	void *data_buf; /* 4KB buffer for RDMA read */
+	struct page *data_pages; /* Page-backed buffer for RDMA read */
+	void *data_buf; /* 16KB buffer for RDMA read */
 	void *send_buf; /* Send message buffer */
 	void *recv_buf; /* Receive buffer for reply */
 	struct ubcore_target_seg *send_seg;
@@ -87,6 +89,16 @@ struct urma_client_ctx {
 };
 
 static struct urma_client_ctx g_client_ctx;
+
+static void urma_client_free_data_pages(struct urma_client_ctx *ctx)
+{
+	if (ctx->data_pages)
+		__free_pages(ctx->data_pages,
+			     get_order(PAGE_ALIGN(URMA_DEMO_CLIENT_BUF_SIZE)));
+
+	ctx->data_pages = NULL;
+	ctx->data_buf = NULL;
+}
 
 /*
  * Poll JFC for completions with timeout
@@ -262,17 +274,23 @@ static int urma_client_create_resources(struct urma_client_ctx *ctx)
 	pr_info("%s: Jetty created, id=%u, eid=%s\n", URMA_CLIENT_NAME,
 		ctx->jetty->jetty_id.id, eid_str);
 
-	data_buf_len = ALIGN(URMA_DEMO_CLIENT_BUF_SIZE, 4096);
+	data_buf_len = PAGE_ALIGN(URMA_DEMO_CLIENT_BUF_SIZE);
 	msg_buf_len = ALIGN(URMA_DEMO_MSG_BUF_SIZE, 4096);
 
-	/* Allocate and register data buffer (4KB for RDMA read) */
-	ctx->data_buf = kzalloc(data_buf_len, GFP_KERNEL);
-	if (!ctx->data_buf) {
+	/* Allocate and register page-backed data buffer for RDMA read */
+	ctx->data_pages = alloc_pages(GFP_KERNEL | __GFP_ZERO,
+				      get_order(data_buf_len));
+	if (!ctx->data_pages) {
 		ret = -ENOMEM;
 		goto err_delete_jetty;
 	}
-	if (!IS_ALIGNED((unsigned long)ctx->data_buf, 4096)) {
-		pr_err("%s: data buffer is not 4KB aligned\n",
+	ctx->data_buf = page_address(ctx->data_pages);
+	if (!ctx->data_buf) {
+		ret = -ENOMEM;
+		goto err_free_data_buf;
+	}
+	if (!IS_ALIGNED((unsigned long)ctx->data_buf, PAGE_SIZE)) {
+		pr_err("%s: data buffer is not page aligned\n",
 		       URMA_CLIENT_NAME);
 		ret = -EINVAL;
 		goto err_free_data_buf;
@@ -375,7 +393,7 @@ err_free_send_buf:
 err_unreg_data_seg:
 	ubcore_unregister_seg(ctx->local_seg);
 err_free_data_buf:
-	kfree(ctx->data_buf);
+	urma_client_free_data_pages(ctx);
 err_delete_jetty:
 	ubcore_delete_jetty(ctx->jetty);
 err_delete_jfr:
@@ -721,8 +739,7 @@ static void urma_client_remove_dev(struct ubcore_device *ub_dev,
 		kfree(ctx->send_buf);
 	if (ctx->local_seg)
 		ubcore_unregister_seg(ctx->local_seg);
-	if (ctx->data_buf)
-		kfree(ctx->data_buf);
+	urma_client_free_data_pages(ctx);
 	if (ctx->jetty)
 		ubcore_delete_jetty(ctx->jetty);
 	if (ctx->jfr)

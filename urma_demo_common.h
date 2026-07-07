@@ -17,7 +17,7 @@
 #include <linux/crc32.h>
 
 /* Buffer sizes */
-#define URMA_DEMO_CLIENT_BUF_SIZE 4096 /* 4KB client buffer for RDMA read */
+#define URMA_DEMO_CLIENT_BUF_SIZE (16 * 1024) /* 16KB client buffer for RDMA read */
 #define URMA_DEMO_MSG_BUF_SIZE 256 /* Message buffer size */
 #define URMA_DEMO_SAMPLE_DATA_SIZE 64 /* Sample data in reply */
 
@@ -59,7 +59,7 @@ struct urma_demo_seg_info_msg {
 	u8 msg_type; /* URMA_DEMO_MSG_TYPE_SEG_INFO */
 	u8 reserved1[3]; /* Alignment padding */
 	u64 seg_va; /* Virtual address of registered segment */
-	u32 seg_len; /* Length of segment (4096) */
+	u32 seg_len; /* Length of client data to read */
 	u32 token; /* Segment access token */
 	u32 token_id; /* Token ID */
 	u8 src_eid[URMA_DEMO_EID_SIZE]; /* Client's EID (16 bytes) */
