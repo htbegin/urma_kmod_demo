@@ -223,7 +223,7 @@ This demo uses RM (Reliable Message) transport mode, which provides:
 
 ### Memory Registration
 
-The client allocates a 16KB source buffer with `alloc_pages()` and fills it with magic pattern (0xDE). It builds a page `sg_table`, maps it with `dma_map_sgtable()`, validates that DMA mapping produced one 16KB segment, and sends `sg_dma_address()` as the remote-visible UBVA. The server imports that DMA-mapped UBVA using `ubcore_import_seg()`. After RDMA READ completes, the server computes CRC32 over the read data and returns it to the client for full-buffer verification.
+The client allocates a 16KB source buffer with `alloc_pages()` and fills it with magic pattern (0xDE). It builds a page `sg_table`, maps it with `dma_map_sgtable()`, validates that DMA mapping produced one 16KB segment, and sends `sg_dma_address()` as the remote-visible UBVA. The `token_id` sent with that UBVA is derived from the DMA device's default DMA domain, not from a URMA data segment registration. The server imports that DMA-mapped UBVA using `ubcore_import_seg()`. After RDMA READ completes, the server computes CRC32 over the read data and returns it to the client for full-buffer verification.
 
 ### RDMA Operations
 
