@@ -278,8 +278,7 @@ static int urma_server_create_resources(struct urma_server_ctx *ctx)
 	seg_cfg.va = (u64)ctx->recv_buf;
 	seg_cfg.len = msg_buf_len;
 	seg_cfg.flag.bs.token_policy = UBCORE_TOKEN_NONE;
-	seg_cfg.flag.bs.access = UBCORE_ACCESS_LOCAL_ONLY | UBCORE_ACCESS_READ |
-				 UBCORE_ACCESS_WRITE;
+	seg_cfg.flag.bs.access = UBCORE_ACCESS_READ | UBCORE_ACCESS_WRITE;
 	seg_cfg.eid_index = ctx->eid_index;
 	get_random_bytes(&seg_cfg.token_value.token,
 			 sizeof(seg_cfg.token_value.token));
