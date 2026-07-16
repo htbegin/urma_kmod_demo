@@ -414,12 +414,17 @@ static int urma_server_import_client_seg(struct urma_server_ctx *ctx,
 	int ret;
 
 	urma_demo_format_eid(msg->src_eid, eid_str, sizeof(eid_str));
-	pr_info("%s: Importing client segment: va=0x%llx, len=%u, eid=%s, jetty_id=%u\n",
-		URMA_SERVER_NAME, msg->seg_va, msg->seg_len, eid_str,
-		msg->src_jetty_id);
+	pr_info("%s: Importing client segment: va=0x%llx, len=%u, token_id=0x%x, token=0x%x, eid=%s, jetty_id=%u\n",
+		URMA_SERVER_NAME, msg->seg_va, msg->seg_len, msg->token_id,
+		msg->token, eid_str, msg->src_jetty_id);
 	client_jetty = urma_server_effective_client_jetty();
 	if (client_jetty == 0) {
 		pr_err("%s: client_jetty must be non-zero\n", URMA_SERVER_NAME);
+		return -EINVAL;
+	}
+	if (msg->token == 0) {
+		pr_err("%s: client segment token must be non-zero\n",
+		       URMA_SERVER_NAME);
 		return -EINVAL;
 	}
 	if (msg->src_jetty_id != client_jetty) {
@@ -455,6 +460,7 @@ static int urma_server_import_client_seg(struct urma_server_ctx *ctx,
 	memcpy(seg_cfg.seg.ubva.eid.raw, msg->src_eid, URMA_DEMO_EID_SIZE);
 	seg_cfg.seg.len = msg->seg_len;
 	seg_cfg.seg.token_id = msg->token_id;
+	seg_cfg.seg.attr.bs.token_policy = UBCORE_TOKEN_PLAIN_TEXT;
 	seg_cfg.token_value.token = msg->token;
 	seg_cfg.flag.bs.access = UBCORE_ACCESS_READ;
 	seg_cfg.flag.bs.mapping = UBCORE_SEG_NOMAP;

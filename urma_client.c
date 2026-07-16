@@ -21,6 +21,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/iommu.h>
 #include <linux/ummu_core.h>
+#include <linux/mutex.h>
 #include <linux/delay.h>
 #include <linux/random.h>
 #include <linux/inet.h>
@@ -78,14 +79,18 @@ struct urma_client_ctx {
 	u8 server_eid_raw[URMA_DEMO_EID_SIZE];
 
 	/* Buffers */
-	struct page *data_pages; /* Page-backed buffer for RDMA read */
-	void *data_buf; /* 16KB buffer for RDMA read */
+	struct page *data_pages[URMA_CLIENT_DATA_PAGE_COUNT];
+	struct device *data_tdev;
+	struct iommu_domain *data_domain;
 	struct sg_table data_sgt;
 	struct scatterlist data_sgl[URMA_CLIENT_DATA_PAGE_COUNT];
+	bool data_mapt_granted;
 	bool data_dma_mapped;
-	dma_addr_t data_dma_addr;
-	u32 data_dma_len;
-	u32 data_dma_token;
+	dma_addr_t data_iova;
+	u32 data_iova_len;
+	u32 data_tid;
+	u32 data_token_id;
+	u32 data_token_value;
 	u32 data_crc32;
 	void *send_buf; /* Send message buffer */
 	void *recv_buf; /* Receive buffer for reply */
@@ -103,28 +108,263 @@ struct urma_client_ctx {
 };
 
 static struct urma_client_ctx g_client_ctx;
+static DEFINE_MUTEX(urma_demo_mapt_mutex);
+
+static const struct iommu_perm_ops *
+urma_demo_domain_perm_ops(struct iommu_domain *domain)
+{
+#ifdef CONFIG_IOMMU_KSVA
+	return domain ? domain->perm_ops : NULL;
+#else
+	return NULL;
+#endif
+}
+
+static int urma_demo_domain_grant(struct iommu_domain *domain, u64 iova,
+				  size_t len, int perm, void *cookie)
+{
+	const struct iommu_perm_ops *perm_ops =
+		urma_demo_domain_perm_ops(domain);
+	struct iommu_plb_gather gather = {};
+	int ret;
+
+	if (!perm_ops || !perm_ops->grant)
+		return -EOPNOTSUPP;
+
+	mutex_lock(&urma_demo_mapt_mutex);
+	ret = perm_ops->grant(domain, (void *)(uintptr_t)iova, len, perm,
+			      cookie, &gather);
+	iommu_plb_sync(domain, &gather);
+	mutex_unlock(&urma_demo_mapt_mutex);
+
+	return ret;
+}
+
+static int urma_demo_domain_ungrant(struct iommu_domain *domain, u64 iova,
+				    size_t len, void *cookie)
+{
+	const struct iommu_perm_ops *perm_ops =
+		urma_demo_domain_perm_ops(domain);
+	struct iommu_plb_gather gather = {};
+	int ret;
+
+	if (!perm_ops || !perm_ops->ungrant)
+		return -EOPNOTSUPP;
+
+	mutex_lock(&urma_demo_mapt_mutex);
+	ret = perm_ops->ungrant(domain, (void *)(uintptr_t)iova, len, cookie,
+				&gather);
+	iommu_plb_sync(domain, &gather);
+	mutex_unlock(&urma_demo_mapt_mutex);
+
+	return ret;
+}
+
+static int urma_client_alloc_data_tdev(struct urma_client_ctx *ctx)
+{
+	const struct iommu_perm_ops *perm_ops;
+	struct tdev_attr attr;
+	u32 tid = UMMU_INVALID_TID;
+	int ret;
+
+	tdev_attr_init(&attr);
+	attr.name = "urma-demo-data";
+	attr.mode = MAPT_MODE_TABLE;
+
+	ctx->data_tdev = ummu_core_alloc_tdev(&attr, &tid);
+	if (!ctx->data_tdev) {
+		pr_err("%s: failed to allocate data tdev\n", URMA_CLIENT_NAME);
+		return -ENODEV;
+	}
+
+	ctx->data_domain = iommu_get_domain_for_dev(ctx->data_tdev);
+	if (!ctx->data_domain) {
+		pr_err("%s: data tdev has no IOMMU domain\n",
+		       URMA_CLIENT_NAME);
+		ret = -ENODEV;
+		goto err_free_tdev;
+	}
+
+	if (!ctx->data_domain->ops || !ctx->data_domain->ops->map_pages) {
+		pr_err("%s: data tdev domain does not support page mappings\n",
+		       URMA_CLIENT_NAME);
+		ret = -EOPNOTSUPP;
+		goto err_free_tdev;
+	}
+
+	perm_ops = urma_demo_domain_perm_ops(ctx->data_domain);
+	if (!perm_ops || !perm_ops->grant || !perm_ops->ungrant) {
+#ifndef CONFIG_IOMMU_KSVA
+		pr_err("%s: kernel is built without CONFIG_IOMMU_KSVA; MAPT grants are unavailable\n",
+		       URMA_CLIENT_NAME);
+#endif
+		pr_err("%s: data tdev domain does not support MAPT grants\n",
+		       URMA_CLIENT_NAME);
+		ret = -EOPNOTSUPP;
+		goto err_free_tdev;
+	}
+
+	if (tid == UMMU_NO_TID || tid == UMMU_INVALID_TID) {
+		pr_err("%s: data tdev returned invalid TID %u\n",
+		       URMA_CLIENT_NAME, tid);
+		ret = -EOPNOTSUPP;
+		goto err_free_tdev;
+	}
+
+	get_random_bytes(&ctx->data_token_value,
+			 sizeof(ctx->data_token_value));
+	if (!ctx->data_token_value)
+		ctx->data_token_value = 1;
+
+	ctx->data_tid = tid;
+	ctx->data_token_id = tid << UDMA_TID_SHIFT;
+
+	pr_info("%s: Data tdev allocated, tid=%u, token_id=0x%x, token=0x%x\n",
+		URMA_CLIENT_NAME, ctx->data_tid, ctx->data_token_id,
+		ctx->data_token_value);
+	return 0;
+
+err_free_tdev:
+	ummu_core_free_tdev(ctx->data_tdev);
+	ctx->data_tdev = NULL;
+	ctx->data_domain = NULL;
+	return ret;
+}
+
+static int urma_client_grant_data_iova(struct urma_client_ctx *ctx)
+{
+	struct ummu_token_info token_info = {
+		.input = 0,
+		.tokenVal = ctx->data_token_value,
+	};
+	struct ummu_seg_attr seg_attr = {
+		.token = &token_info,
+		.e_bit = UMMU_EBIT_OFF,
+	};
+	int ret;
+
+	if (ctx->data_mapt_granted)
+		return 0;
+
+	ret = urma_demo_domain_grant(ctx->data_domain, ctx->data_iova,
+				     ctx->data_iova_len, UMMU_DEV_READ,
+				     &seg_attr);
+	if (ret) {
+		pr_err("%s: failed to grant data IOVA 0x%llx len=%u token=0x%x: %d\n",
+		       URMA_CLIENT_NAME, (unsigned long long)ctx->data_iova,
+		       ctx->data_iova_len, ctx->data_token_value, ret);
+		return ret;
+	}
+
+	ctx->data_mapt_granted = true;
+	pr_info("%s: Data IOVA granted, iova=0x%llx len=%u token=0x%x\n",
+		URMA_CLIENT_NAME, (unsigned long long)ctx->data_iova,
+		ctx->data_iova_len, ctx->data_token_value);
+	return 0;
+}
+
+static int urma_client_ungrant_data_iova(struct urma_client_ctx *ctx)
+{
+	struct ummu_token_info token_info = {
+		.input = 0,
+		.tokenVal = ctx->data_token_value,
+	};
+	int ret;
+
+	if (!ctx->data_mapt_granted)
+		return 0;
+
+	ret = urma_demo_domain_ungrant(ctx->data_domain, ctx->data_iova,
+				       ctx->data_iova_len, &token_info);
+	if (ret) {
+		pr_err("%s: failed to ungrant data IOVA 0x%llx len=%u token=0x%x: %d\n",
+		       URMA_CLIENT_NAME, (unsigned long long)ctx->data_iova,
+		       ctx->data_iova_len, ctx->data_token_value, ret);
+		return ret;
+	}
+
+	ctx->data_mapt_granted = false;
+	pr_info("%s: Data IOVA ungranted\n", URMA_CLIENT_NAME);
+	return 0;
+}
+
+static int urma_client_alloc_data_pages(struct urma_client_ctx *ctx, size_t len)
+{
+	size_t remaining = len;
+	u32 crc = (u32)~0U;
+	int i;
+
+	for (i = 0; i < URMA_CLIENT_DATA_PAGE_COUNT; i++) {
+		unsigned int page_len = min_t(size_t, remaining, PAGE_SIZE);
+		void *page_buf;
+
+		ctx->data_pages[i] = alloc_page(GFP_KERNEL | __GFP_ZERO);
+		if (!ctx->data_pages[i])
+			return -ENOMEM;
+
+		page_buf = page_address(ctx->data_pages[i]);
+		if (!page_buf) {
+			pr_err("%s: data page %d has no kernel address\n",
+			       URMA_CLIENT_NAME, i);
+			return -ENOMEM;
+		}
+
+		memset(page_buf, URMA_DEMO_MAGIC_PATTERN, page_len);
+		crc = crc32_le(crc, page_buf, page_len);
+		remaining -= page_len;
+
+		pr_info("%s: Data page %d pfn=%lu len=%u\n",
+			URMA_CLIENT_NAME, i, page_to_pfn(ctx->data_pages[i]),
+			page_len);
+	}
+
+	ctx->data_crc32 = crc ^ (u32)~0U;
+	return 0;
+}
 
 static void urma_client_unmap_data_sgt(struct urma_client_ctx *ctx)
 {
 	if (!ctx->data_dma_mapped)
 		return;
 
-	dma_unmap_sgtable(ctx->ub_dev->dma_dev, &ctx->data_sgt, DMA_TO_DEVICE, 0);
+	dma_unmap_sgtable(ctx->data_tdev, &ctx->data_sgt, DMA_TO_DEVICE, 0);
 	ctx->data_dma_mapped = false;
-	ctx->data_dma_addr = 0;
-	ctx->data_dma_len = 0;
+	ctx->data_iova = 0;
+	ctx->data_iova_len = 0;
 }
 
 static void urma_client_free_data_pages(struct urma_client_ctx *ctx)
 {
+	int i;
+
+	for (i = 0; i < URMA_CLIENT_DATA_PAGE_COUNT; i++) {
+		if (!ctx->data_pages[i])
+			continue;
+
+		__free_page(ctx->data_pages[i]);
+		ctx->data_pages[i] = NULL;
+	}
+}
+
+static void urma_client_release_data_window(struct urma_client_ctx *ctx)
+{
+	if (urma_client_ungrant_data_iova(ctx)) {
+		pr_err("%s: keeping data mapping because MAPT ungrant failed\n",
+		       URMA_CLIENT_NAME);
+		return;
+	}
+
 	urma_client_unmap_data_sgt(ctx);
+	urma_client_free_data_pages(ctx);
 
-	if (ctx->data_pages)
-		__free_pages(ctx->data_pages,
-			     get_order(PAGE_ALIGN(URMA_DEMO_CLIENT_BUF_SIZE)));
-
-	ctx->data_pages = NULL;
-	ctx->data_buf = NULL;
+	if (ctx->data_tdev) {
+		ummu_core_free_tdev(ctx->data_tdev);
+		ctx->data_tdev = NULL;
+		ctx->data_domain = NULL;
+		ctx->data_tid = 0;
+		ctx->data_token_id = 0;
+		ctx->data_token_value = 0;
+	}
 }
 
 static int urma_client_map_data_sgt(struct urma_client_ctx *ctx, size_t len)
@@ -133,15 +373,19 @@ static int urma_client_map_data_sgt(struct urma_client_ctx *ctx, size_t len)
 	int ret;
 	int i;
 
-	if (!ctx->ub_dev->dma_dev)
+	if (!ctx->data_tdev)
 		return -ENODEV;
+	if (len > URMA_CLIENT_DATA_PAGE_COUNT * PAGE_SIZE)
+		return -EINVAL;
 
 	sg_init_table(ctx->data_sgl, URMA_CLIENT_DATA_PAGE_COUNT);
 	for (i = 0; i < URMA_CLIENT_DATA_PAGE_COUNT; i++) {
 		unsigned int page_len = min_t(size_t, remaining, PAGE_SIZE);
 
-		sg_set_page(&ctx->data_sgl[i], nth_page(ctx->data_pages, i),
-			    page_len, 0);
+		if (!ctx->data_pages[i])
+			return -EINVAL;
+
+		sg_set_page(&ctx->data_sgl[i], ctx->data_pages[i], page_len, 0);
 		remaining -= page_len;
 	}
 
@@ -149,7 +393,7 @@ static int urma_client_map_data_sgt(struct urma_client_ctx *ctx, size_t len)
 	ctx->data_sgt.orig_nents = URMA_CLIENT_DATA_PAGE_COUNT;
 	ctx->data_sgt.nents = URMA_CLIENT_DATA_PAGE_COUNT;
 
-	ret = dma_map_sgtable(ctx->ub_dev->dma_dev, &ctx->data_sgt,
+	ret = dma_map_sgtable(ctx->data_tdev, &ctx->data_sgt,
 			      DMA_TO_DEVICE, 0);
 	if (ret) {
 		pr_err("%s: failed to DMA map data sgtable: %d\n",
@@ -166,83 +410,16 @@ static int urma_client_map_data_sgt(struct urma_client_ctx *ctx, size_t len)
 		return -ERANGE;
 	}
 
-	ctx->data_dma_addr = sg_dma_address(ctx->data_sgt.sgl);
-	ctx->data_dma_len = sg_dma_len(ctx->data_sgt.sgl);
+	ctx->data_iova = sg_dma_address(ctx->data_sgt.sgl);
+	ctx->data_iova_len = sg_dma_len(ctx->data_sgt.sgl);
 
-	pr_info("%s: Data sgtable DMA mapped, ubva=%pad, len=%u\n",
-		URMA_CLIENT_NAME, &ctx->data_dma_addr, ctx->data_dma_len);
-	return 0;
-}
+	pr_info("%s: Data sgtable DMA mapped by tdev, iova=%pad, len=%u\n",
+		URMA_CLIENT_NAME, &ctx->data_iova, ctx->data_iova_len);
 
-static int urma_client_get_dma_domain_token(struct urma_client_ctx *ctx,
-					    u32 *token)
-{
-	struct device *dma_dev;
-	struct iommu_group *group;
-	struct iommu_domain *dma_domain;
-	struct iommu_domain *cur_domain;
-	struct ummu_base_domain *base;
-	u32 tid;
-	int ret = 0;
+	ret = urma_client_grant_data_iova(ctx);
+	if (ret)
+		urma_client_unmap_data_sgt(ctx);
 
-	if (!ctx || !token) {
-		pr_err("%s: invalid DMA-domain token arguments\n",
-		       URMA_CLIENT_NAME);
-		return -EINVAL;
-	}
-
-	if (!ctx->ub_dev || !ctx->ub_dev->dma_dev) {
-		pr_err("%s: URMA device has no DMA device for token lookup\n",
-		       URMA_CLIENT_NAME);
-		return -EINVAL;
-	}
-
-	dma_dev = ctx->ub_dev->dma_dev;
-	group = iommu_group_get(dma_dev);
-	if (!group) {
-		pr_err("%s: DMA device %s has no IOMMU group\n",
-		       URMA_CLIENT_NAME, dev_name(dma_dev));
-		return -ENODEV;
-	}
-
-	dma_domain = iommu_group_default_domain(group);
-	cur_domain = iommu_get_domain_for_dev(dma_dev);
-	if (!dma_domain || !cur_domain) {
-		pr_err("%s: DMA device %s missing IOMMU domain (default=%p, current=%p)\n",
-		       URMA_CLIENT_NAME, dev_name(dma_dev), dma_domain,
-		       cur_domain);
-		ret = -ENODEV;
-		goto out_put_group;
-	}
-
-	if (dma_domain != cur_domain) {
-		pr_err("%s: DMA device %s default domain %p differs from current domain %p\n",
-		       URMA_CLIENT_NAME, dev_name(dma_dev), dma_domain,
-		       cur_domain);
-		ret = -EXDEV;
-		goto out_put_group;
-	}
-
-	if (!dma_domain->ops || !dma_domain->ops->map_pages) {
-		pr_err("%s: DMA device %s domain does not support page mappings\n",
-		       URMA_CLIENT_NAME, dev_name(dma_dev));
-		ret = -EOPNOTSUPP;
-		goto out_put_group;
-	}
-
-	base = to_ummu_base_domain(dma_domain);
-	tid = base->tid;
-	if (tid == UMMU_NO_TID || tid == UMMU_INVALID_TID) {
-		pr_err("%s: DMA device %s domain has invalid TID %u\n",
-		       URMA_CLIENT_NAME, dev_name(dma_dev), tid);
-		ret = -EOPNOTSUPP;
-		goto out_put_group;
-	}
-
-	*token = tid << UDMA_TID_SHIFT;
-
-out_put_group:
-	iommu_group_put(group);
 	return ret;
 }
 
@@ -351,7 +528,7 @@ static int urma_client_create_resources(struct urma_client_ctx *ctx)
 	struct ubcore_jetty_cfg jetty_cfg = { 0 };
 	struct ubcore_seg_cfg seg_cfg = { 0 };
 	int ret;
-	size_t data_buf_len;
+	size_t data_len;
 	size_t msg_buf_len;
 	char eid_str[64];
 
@@ -416,46 +593,20 @@ static int urma_client_create_resources(struct urma_client_ctx *ctx)
 	pr_info("%s: Jetty created, id=%u, eid=%s\n", URMA_CLIENT_NAME,
 		ctx->jetty->jetty_id.id, eid_str);
 
-	data_buf_len = PAGE_ALIGN(URMA_DEMO_CLIENT_BUF_SIZE);
+	data_len = PAGE_ALIGN(URMA_DEMO_CLIENT_BUF_SIZE);
 	msg_buf_len = ALIGN(URMA_DEMO_MSG_BUF_SIZE, 4096);
 
-	/* Allocate page-backed data buffer for RDMA read */
-	ctx->data_pages = alloc_pages(GFP_KERNEL | __GFP_ZERO,
-				      get_order(data_buf_len));
-	if (!ctx->data_pages) {
-		ret = -ENOMEM;
-		goto err_delete_jetty;
-	}
-	ctx->data_buf = page_address(ctx->data_pages);
-	if (!ctx->data_buf) {
-		ret = -ENOMEM;
-		goto err_free_data_buf;
-	}
-	if (!IS_ALIGNED((unsigned long)ctx->data_buf, PAGE_SIZE)) {
-		pr_err("%s: data buffer is not page aligned\n",
-		       URMA_CLIENT_NAME);
-		ret = -EINVAL;
-		goto err_free_data_buf;
-	}
-
-	/* Fill buffer with magic pattern for verification */
-	memset(ctx->data_buf, URMA_DEMO_MAGIC_PATTERN,
-	       URMA_DEMO_CLIENT_BUF_SIZE);
-	ctx->data_crc32 = urma_demo_crc32(ctx->data_buf,
-					  URMA_DEMO_CLIENT_BUF_SIZE);
-
-	ret = urma_client_map_data_sgt(ctx, data_buf_len);
+	ret = urma_client_alloc_data_tdev(ctx);
 	if (ret)
-		goto err_free_data_buf;
+		goto err_delete_jetty;
 
-	ret = urma_client_get_dma_domain_token(ctx, &ctx->data_dma_token);
-	if (ret) {
-		pr_err("%s: failed to get DMA-domain token: %d\n",
-		       URMA_CLIENT_NAME, ret);
-		goto err_free_data_buf;
-	}
-	pr_info("%s: DMA data token=0x%x\n", URMA_CLIENT_NAME,
-		ctx->data_dma_token);
+	ret = urma_client_alloc_data_pages(ctx, data_len);
+	if (ret)
+		goto err_release_data_window;
+
+	ret = urma_client_map_data_sgt(ctx, data_len);
+	if (ret)
+		goto err_release_data_window;
 
 	seg_cfg.flag.bs.token_policy = UBCORE_TOKEN_NONE;
 	seg_cfg.flag.bs.access = UBCORE_ACCESS_READ | UBCORE_ACCESS_WRITE;
@@ -465,7 +616,7 @@ static int urma_client_create_resources(struct urma_client_ctx *ctx)
 	ctx->send_buf = kzalloc(msg_buf_len, GFP_KERNEL);
 	if (!ctx->send_buf) {
 		ret = -ENOMEM;
-		goto err_free_data_buf;
+		goto err_release_data_window;
 	}
 	if (!IS_ALIGNED((unsigned long)ctx->send_buf, 4096)) {
 		pr_err("%s: send buffer is not 4KB aligned\n",
@@ -531,8 +682,8 @@ err_unreg_send_seg:
 	ubcore_unregister_seg(ctx->send_seg);
 err_free_send_buf:
 	kfree(ctx->send_buf);
-err_free_data_buf:
-	urma_client_free_data_pages(ctx);
+err_release_data_window:
+	urma_client_release_data_window(ctx);
 err_delete_jetty:
 	ubcore_delete_jetty(ctx->jetty);
 err_delete_jfr:
@@ -641,16 +792,16 @@ static int urma_client_send_seg_info(struct urma_client_ctx *ctx)
 	memset(msg, 0, sizeof(*msg));
 
 	msg->msg_type = URMA_DEMO_MSG_TYPE_SEG_INFO;
-	msg->seg_va = ctx->data_dma_addr;
-	msg->seg_len = URMA_DEMO_CLIENT_BUF_SIZE;
-	msg->token = 0; /* Token disabled */
-	msg->token_id = ctx->data_dma_token;
+	msg->seg_va = ctx->data_iova;
+	msg->seg_len = ctx->data_iova_len;
+	msg->token = ctx->data_token_value;
+	msg->token_id = ctx->data_token_id;
 	memcpy(msg->src_eid, ctx->jetty->jetty_id.eid.raw, URMA_DEMO_EID_SIZE);
 	msg->src_jetty_id = ctx->jetty->jetty_id.id;
 
-	pr_info("%s: Sending seg info: dma_ubva=0x%llx, len=%u, token_id=0x%x, jetty_id=%u\n",
-		URMA_CLIENT_NAME, msg->seg_va, msg->seg_len, msg->token_id,
-		msg->src_jetty_id);
+	pr_info("%s: Sending seg info: iova=0x%llx, len=%u, token_id=0x%x, token=0x%x, jetty_id=%u\n",
+		URMA_CLIENT_NAME, msg->seg_va, msg->seg_len,
+		msg->token_id, msg->token, msg->src_jetty_id);
 
 	/* Prepare send WR */
 	send_wr.opcode = UBCORE_OPC_SEND;
@@ -785,6 +936,7 @@ static int urma_client_run_test(struct urma_client_ctx *ctx)
 	if (ret)
 		goto err_disconnect;
 
+	urma_client_release_data_window(ctx);
 	pr_info("%s: Test completed successfully!\n", URMA_CLIENT_NAME);
 	return 0;
 
@@ -887,7 +1039,7 @@ static void urma_client_remove_dev(struct ubcore_device *ub_dev,
 		ubcore_unregister_seg(ctx->send_seg);
 	if (ctx->send_buf)
 		kfree(ctx->send_buf);
-	urma_client_free_data_pages(ctx);
+	urma_client_release_data_window(ctx);
 	if (ctx->jetty)
 		ubcore_delete_jetty(ctx->jetty);
 	if (ctx->jfr)
