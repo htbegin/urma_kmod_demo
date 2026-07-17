@@ -34,7 +34,6 @@
 
 #define URMA_CLIENT_NAME "urma_demo_client"
 #define URMA_CLIENT_DATA_PAGE_COUNT (URMA_DEMO_CLIENT_BUF_SIZE / PAGE_SIZE)
-#define URMA_CLIENT_DATA_TDEV_DMA_MASK DMA_BIT_MASK(47)
 
 /* Module parameters */
 static char *server_eid = "";
@@ -87,6 +86,9 @@ struct urma_client_ctx {
 	struct scatterlist data_sgl[URMA_CLIENT_DATA_PAGE_COUNT];
 	bool data_mapt_granted;
 	bool data_dma_mapped;
+	bool data_iova_guard_mapped;
+	struct page *data_iova_guard_page;
+	dma_addr_t data_iova_guard;
 	dma_addr_t data_iova;
 	u32 data_iova_len;
 	u32 data_tid;
@@ -175,13 +177,6 @@ static int urma_client_alloc_data_tdev(struct urma_client_ctx *ctx)
 	if (!ctx->data_tdev) {
 		pr_err("%s: failed to allocate data tdev\n", URMA_CLIENT_NAME);
 		return -ENODEV;
-	}
-	ret = dma_set_mask_and_coherent(ctx->data_tdev,
-					URMA_CLIENT_DATA_TDEV_DMA_MASK);
-	if (ret) {
-		pr_err("%s: failed to set data tdev DMA mask: %d\n",
-		       URMA_CLIENT_NAME, ret);
-		goto err_free_tdev;
 	}
 
 	ctx->data_domain = iommu_get_domain_for_dev(ctx->data_tdev);
@@ -315,6 +310,51 @@ static int urma_client_alloc_data_pages(struct urma_client_ctx *ctx, size_t len)
 	return 0;
 }
 
+static int urma_client_map_data_iova_guard(struct urma_client_ctx *ctx)
+{
+	int ret;
+
+	if (ctx->data_iova_guard_mapped)
+		return 0;
+
+	ctx->data_iova_guard_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+	if (!ctx->data_iova_guard_page)
+		return -ENOMEM;
+
+	ctx->data_iova_guard = dma_map_page(ctx->data_tdev,
+					    ctx->data_iova_guard_page, 0,
+					    PAGE_SIZE, DMA_TO_DEVICE);
+	if (dma_mapping_error(ctx->data_tdev, ctx->data_iova_guard)) {
+		ret = -EIO;
+		pr_err("%s: failed to DMA map data IOVA guard\n",
+		       URMA_CLIENT_NAME);
+		__free_page(ctx->data_iova_guard_page);
+		ctx->data_iova_guard_page = NULL;
+		ctx->data_iova_guard = 0;
+		return ret;
+	}
+
+	ctx->data_iova_guard_mapped = true;
+	pr_info("%s: Data IOVA guard mapped, iova=%pad, len=%lu\n",
+		URMA_CLIENT_NAME, &ctx->data_iova_guard, PAGE_SIZE);
+	return 0;
+}
+
+static void urma_client_unmap_data_iova_guard(struct urma_client_ctx *ctx)
+{
+	if (ctx->data_iova_guard_mapped) {
+		dma_unmap_page(ctx->data_tdev, ctx->data_iova_guard, PAGE_SIZE,
+			       DMA_TO_DEVICE);
+		ctx->data_iova_guard_mapped = false;
+		ctx->data_iova_guard = 0;
+	}
+
+	if (ctx->data_iova_guard_page) {
+		__free_page(ctx->data_iova_guard_page);
+		ctx->data_iova_guard_page = NULL;
+	}
+}
+
 static void urma_client_unmap_data_sgt(struct urma_client_ctx *ctx)
 {
 	if (!ctx->data_dma_mapped)
@@ -348,6 +388,7 @@ static void urma_client_release_data_window(struct urma_client_ctx *ctx)
 	}
 
 	urma_client_unmap_data_sgt(ctx);
+	urma_client_unmap_data_iova_guard(ctx);
 	urma_client_free_data_pages(ctx);
 
 	if (ctx->data_tdev) {
@@ -591,6 +632,10 @@ static int urma_client_create_resources(struct urma_client_ctx *ctx)
 	ret = urma_client_alloc_data_tdev(ctx);
 	if (ret)
 		goto err_delete_jetty;
+
+	ret = urma_client_map_data_iova_guard(ctx);
+	if (ret)
+		goto err_release_data_window;
 
 	ret = urma_client_alloc_data_pages(ctx, data_len);
 	if (ret)
