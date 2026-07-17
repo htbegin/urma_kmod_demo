@@ -14,6 +14,7 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/err.h>
+#include <linux/mm.h>
 #include <linux/string.h>
 #include <linux/crc32.h>
 
@@ -21,6 +22,7 @@
 #define URMA_DEMO_CLIENT_BUF_SIZE (16 * 1024) /* 16KB client buffer for RDMA read */
 #define URMA_DEMO_MSG_BUF_SIZE 256 /* Message buffer size */
 #define URMA_DEMO_SAMPLE_DATA_SIZE 64 /* Sample data in reply */
+#define URMA_DEMO_DATA_SEG_COUNT (URMA_DEMO_CLIENT_BUF_SIZE / PAGE_SIZE)
 
 /* EID size */
 #define URMA_DEMO_EID_SIZE 16
@@ -51,21 +53,37 @@
 #define URMA_DEMO_STATUS_TIMEOUT 2
 
 /*
- * Message from client to server containing segment information
+ * One remotely readable data segment exported by the client.
+ *
+ * Total size: 24 bytes
+ */
+struct urma_demo_data_seg_desc {
+	u64 seg_va; /* Client-exported UBVA */
+	u32 seg_len; /* Length of this page segment */
+	u32 token_id; /* Token ID */
+	u32 token; /* Optional segment token value; zero when disabled */
+	u32 reserved;
+} __packed;
+
+#define URMA_DEMO_SEG_INFO_RESERVED_SIZE \
+	(URMA_DEMO_MSG_BUF_SIZE - 4 - \
+	 (URMA_DEMO_DATA_SEG_COUNT * sizeof(struct urma_demo_data_seg_desc)) - \
+	 URMA_DEMO_EID_SIZE - 4)
+
+/*
+ * Message from client to server containing page segment information
  * for RDMA read operation.
  *
- * Total size: 64 bytes
+ * Total size: 256 bytes
  */
 struct urma_demo_seg_info_msg {
 	u8 msg_type; /* URMA_DEMO_MSG_TYPE_SEG_INFO */
-	u8 reserved1[3]; /* Alignment padding */
-	u64 seg_va; /* Tdev-mapped IOVA of client data */
-	u32 seg_len; /* Length of client data to read */
-	u32 token; /* Optional segment token value; zero when disabled */
-	u32 token_id; /* Token ID */
+	u8 seg_count; /* Number of entries in segs[] */
+	u8 reserved1[2]; /* Alignment padding */
+	struct urma_demo_data_seg_desc segs[URMA_DEMO_DATA_SEG_COUNT];
 	u8 src_eid[URMA_DEMO_EID_SIZE]; /* Client's EID (16 bytes) */
 	u32 src_jetty_id; /* Client's jetty ID for reply */
-	u8 reserved2[20]; /* Padding to 64 bytes */
+	u8 reserved2[URMA_DEMO_SEG_INFO_RESERVED_SIZE];
 } __packed;
 
 /*

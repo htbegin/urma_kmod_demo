@@ -76,16 +76,15 @@ struct urma_server_ctx {
 	struct ubcore_target_seg *send_seg;
 	struct ubcore_target_seg *read_seg;
 
-	/* Imported client segment for RDMA read */
-	struct ubcore_target_seg *client_seg;
+	/* Imported client page segments for RDMA read */
+	struct ubcore_target_seg *client_segs[URMA_DEMO_DATA_SEG_COUNT];
+	u8 client_seg_count;
 	struct ubcore_tjetty *client_tjetty;
 	bool jetty_imported_early; /* True if client jetty imported via module params */
 
 	/* SGEs */
 	struct ubcore_sge recv_sge;
 	struct ubcore_sge send_sge;
-	struct ubcore_sge read_local_sge; /* Local destination for RDMA read */
-	struct ubcore_sge read_remote_sge; /* Remote source for RDMA read */
 
 	/* State */
 	bool initialized;
@@ -352,10 +351,6 @@ static int urma_server_create_resources(struct urma_server_ctx *ctx)
 	ctx->send_sge.len = sizeof(struct urma_demo_reply_msg);
 	ctx->send_sge.tseg = ctx->send_seg;
 
-	ctx->read_local_sge.addr = (u64)ctx->read_buf;
-	ctx->read_local_sge.len = URMA_DEMO_CLIENT_BUF_SIZE;
-	ctx->read_local_sge.tseg = ctx->read_seg;
-
 	ctx->initialized = true;
 	return 0;
 
@@ -401,22 +396,36 @@ static int urma_server_post_recv(struct urma_server_ctx *ctx)
 	return 0;
 }
 
+static void urma_server_unimport_client_segs(struct urma_server_ctx *ctx)
+{
+	int i;
+
+	for (i = 0; i < ctx->client_seg_count; i++) {
+		if (!ctx->client_segs[i])
+			continue;
+
+		ubcore_unimport_seg(ctx->client_segs[i]);
+		ctx->client_segs[i] = NULL;
+	}
+	ctx->client_seg_count = 0;
+}
+
 /*
- * Import client's segment for RDMA read
+ * Import client's page segments for RDMA read
  */
-static int urma_server_import_client_seg(struct urma_server_ctx *ctx,
-					 struct urma_demo_seg_info_msg *msg)
+static int urma_server_import_client_segs(struct urma_server_ctx *ctx,
+					  struct urma_demo_seg_info_msg *msg)
 {
 	struct ubcore_target_seg_cfg seg_cfg = { 0 };
 	struct ubcore_tjetty_cfg tjetty_cfg;
 	char eid_str[64];
 	u32 client_jetty;
 	int ret;
+	int i;
 
 	urma_demo_format_eid(msg->src_eid, eid_str, sizeof(eid_str));
-	pr_info("%s: Importing client segment: va=0x%llx, len=%u, token_id=0x%x, eid=%s, jetty_id=%u\n",
-		URMA_SERVER_NAME, msg->seg_va, msg->seg_len, msg->token_id,
-		eid_str, msg->src_jetty_id);
+	pr_info("%s: Importing %u client data segments, eid=%s, jetty_id=%u\n",
+		URMA_SERVER_NAME, msg->seg_count, eid_str, msg->src_jetty_id);
 	client_jetty = urma_server_effective_client_jetty();
 	if (client_jetty == 0) {
 		pr_err("%s: client_jetty must be non-zero\n", URMA_SERVER_NAME);
@@ -450,94 +459,157 @@ static int urma_server_import_client_seg(struct urma_server_ctx *ctx,
 			URMA_SERVER_NAME);
 	}
 
-	/* Import client's segment for RDMA read */
-	seg_cfg.seg.ubva.va = msg->seg_va;
-	memcpy(seg_cfg.seg.ubva.eid.raw, msg->src_eid, URMA_DEMO_EID_SIZE);
-	seg_cfg.seg.len = msg->seg_len;
-	seg_cfg.seg.token_id = msg->token_id;
-	seg_cfg.seg.attr.bs.token_policy = UBCORE_TOKEN_NONE;
-	seg_cfg.flag.bs.access = UBCORE_ACCESS_READ;
-	seg_cfg.flag.bs.mapping = UBCORE_SEG_NOMAP;
-
-	ctx->client_seg = ubcore_import_seg(ctx->ub_dev, &seg_cfg, NULL);
-	if (IS_ERR_OR_NULL(ctx->client_seg)) {
-		ret = urma_demo_ptr_err_or(ctx->client_seg, -ENODEV);
-		pr_err("%s: failed to import client segment: %d\n",
-		       URMA_SERVER_NAME, ret);
-		/* Only unimport jetty if not early-imported */
-		if (!ctx->jetty_imported_early && ctx->client_tjetty) {
-			ubcore_unimport_jetty(ctx->client_tjetty);
-			ctx->client_tjetty = NULL;
-		}
-		ctx->client_seg = NULL;
-		return ret;
+	if (msg->seg_count == 0 ||
+	    msg->seg_count > URMA_DEMO_DATA_SEG_COUNT) {
+		pr_err("%s: invalid client segment count %u\n",
+		       URMA_SERVER_NAME, msg->seg_count);
+		ret = -EINVAL;
+		goto err_unimport_jetty;
 	}
 
-	/* Setup remote SGE for RDMA read */
-	ctx->read_remote_sge.addr = msg->seg_va;
-	ctx->read_remote_sge.len = msg->seg_len;
-	ctx->read_remote_sge.tseg = ctx->client_seg;
+	for (i = 0; i < msg->seg_count; i++) {
+		if (msg->segs[i].seg_len == 0 ||
+		    msg->segs[i].seg_len > PAGE_SIZE) {
+			pr_err("%s: invalid client segment %d length %u\n",
+			       URMA_SERVER_NAME, i, msg->segs[i].seg_len);
+			ret = -EINVAL;
+			goto err_unimport_segs;
+		}
 
-	pr_info("%s: Client segment imported successfully\n", URMA_SERVER_NAME);
+		memset(&seg_cfg, 0, sizeof(seg_cfg));
+		seg_cfg.seg.ubva.va = msg->segs[i].seg_va;
+		memcpy(seg_cfg.seg.ubva.eid.raw, msg->src_eid,
+		       URMA_DEMO_EID_SIZE);
+		seg_cfg.seg.len = msg->segs[i].seg_len;
+		seg_cfg.seg.token_id = msg->segs[i].token_id;
+		seg_cfg.seg.attr.bs.token_policy = UBCORE_TOKEN_NONE;
+		seg_cfg.token_value.token = msg->segs[i].token;
+		seg_cfg.flag.bs.access = UBCORE_ACCESS_READ;
+		seg_cfg.flag.bs.mapping = UBCORE_SEG_NOMAP;
+
+		ctx->client_segs[i] =
+			ubcore_import_seg(ctx->ub_dev, &seg_cfg, NULL);
+		if (IS_ERR_OR_NULL(ctx->client_segs[i])) {
+			ret = urma_demo_ptr_err_or(ctx->client_segs[i],
+						   -ENODEV);
+			pr_err("%s: failed to import client segment %d: %d\n",
+			       URMA_SERVER_NAME, i, ret);
+			ctx->client_segs[i] = NULL;
+			goto err_unimport_segs;
+		}
+
+		pr_info("%s: Client segment %d imported, va=0x%llx, len=%u, token_id=0x%x\n",
+			URMA_SERVER_NAME, i, msg->segs[i].seg_va,
+			msg->segs[i].seg_len, msg->segs[i].token_id);
+		ctx->client_seg_count++;
+	}
+
+	pr_info("%s: Client data segments imported successfully\n",
+		URMA_SERVER_NAME);
 	return 0;
+
+err_unimport_segs:
+	urma_server_unimport_client_segs(ctx);
+err_unimport_jetty:
+	/* Only unimport jetty if not early-imported */
+	if (!ctx->jetty_imported_early && ctx->client_tjetty) {
+		ubcore_unimport_jetty(ctx->client_tjetty);
+		ctx->client_tjetty = NULL;
+	}
+	return ret;
 }
 
 /*
  * Perform RDMA read from client's memory
  */
-static int urma_server_rdma_read(struct urma_server_ctx *ctx)
+static int urma_server_rdma_read(struct urma_server_ctx *ctx, u32 *bytes_read)
 {
-	struct ubcore_jfs_wr read_wr = { 0 };
 	struct ubcore_jfs_wr *bad_wr = NULL;
-	struct ubcore_cr cr = { 0 };
+	u32 total_len = 0;
+	int i;
 	int ret;
 
 	pr_info("%s: Performing RDMA read from client memory...\n",
 		URMA_SERVER_NAME);
 
-	if (!ctx->client_tjetty || !ctx->client_seg) {
+	if (!ctx->client_tjetty || ctx->client_seg_count == 0) {
 		pr_err("%s: cannot post RDMA read: client jetty or segment is missing\n",
 		       URMA_SERVER_NAME);
 		return -ENOTCONN;
 	}
 
-	/* Prepare RDMA READ work request */
-	read_wr.opcode = UBCORE_OPC_READ;
-	read_wr.flag.bs.complete_enable = 1;
-	read_wr.user_ctx = (u64)ctx;
-	read_wr.tjetty = ctx->client_tjetty;
+	for (i = 0; i < ctx->client_seg_count; i++) {
+		struct ubcore_jfs_wr read_wr = { 0 };
+		struct ubcore_sge read_local_sge = { 0 };
+		struct ubcore_sge read_remote_sge = { 0 };
+		struct ubcore_cr cr = { 0 };
+		u32 seg_len;
 
-	/* Source (remote): client's memory */
-	read_wr.rw.src.sge = &ctx->read_remote_sge;
-	read_wr.rw.src.num_sge = 1;
+		if (!ctx->client_segs[i]) {
+			pr_err("%s: client segment %d is missing\n",
+			       URMA_SERVER_NAME, i);
+			return -EINVAL;
+		}
 
-	/* Destination (local): our read buffer */
-	read_wr.rw.dst.sge = &ctx->read_local_sge;
-	read_wr.rw.dst.num_sge = 1;
+		seg_len = ctx->client_segs[i]->seg.len;
+		if (total_len + seg_len > URMA_DEMO_CLIENT_BUF_SIZE) {
+			pr_err("%s: client read length exceeds buffer (%u + %u)\n",
+			       URMA_SERVER_NAME, total_len, seg_len);
+			return -EINVAL;
+		}
 
-	/* Post RDMA read */
-	ret = ubcore_post_jetty_send_wr(ctx->jetty, &read_wr, &bad_wr);
-	if (ret) {
-		pr_err("%s: failed to post RDMA read WR: %d\n",
-		       URMA_SERVER_NAME, ret);
-		return ret;
+		read_remote_sge.addr = ctx->client_segs[i]->seg.ubva.va;
+		read_remote_sge.len = seg_len;
+		read_remote_sge.tseg = ctx->client_segs[i];
+
+		read_local_sge.addr = (u64)ctx->read_buf + total_len;
+		read_local_sge.len = seg_len;
+		read_local_sge.tseg = ctx->read_seg;
+
+		/* Prepare RDMA READ work request */
+		read_wr.opcode = UBCORE_OPC_READ;
+		read_wr.flag.bs.complete_enable = 1;
+		read_wr.user_ctx = (u64)ctx;
+		read_wr.tjetty = ctx->client_tjetty;
+
+		/* Source (remote): client's page segment */
+		read_wr.rw.src.sge = &read_remote_sge;
+		read_wr.rw.src.num_sge = 1;
+
+		/* Destination (local): next offset in our read buffer */
+		read_wr.rw.dst.sge = &read_local_sge;
+		read_wr.rw.dst.num_sge = 1;
+
+		ret = ubcore_post_jetty_send_wr(ctx->jetty, &read_wr, &bad_wr);
+		if (ret) {
+			pr_err("%s: failed to post RDMA read WR %d: %d\n",
+			       URMA_SERVER_NAME, i, ret);
+			return ret;
+		}
+
+		ret = urma_server_poll_jfc(ctx->jfc, &cr,
+					   URMA_DEMO_POLL_TIMEOUT_MS);
+		if (ret) {
+			pr_err("%s: RDMA read %d completion timeout\n",
+			       URMA_SERVER_NAME, i);
+			return ret;
+		}
+
+		if (cr.status != UBCORE_CR_SUCCESS) {
+			pr_err("%s: RDMA read %d failed with status %d\n",
+			       URMA_SERVER_NAME, i, cr.status);
+			return -EIO;
+		}
+
+		pr_info("%s: RDMA read %d completed successfully, requested %u bytes, completion_len=%u\n",
+			URMA_SERVER_NAME, i, seg_len, cr.completion_len);
+		total_len += seg_len;
 	}
 
-	/* Wait for read completion */
-	ret = urma_server_poll_jfc(ctx->jfc, &cr, URMA_DEMO_POLL_TIMEOUT_MS);
-	if (ret) {
-		pr_err("%s: RDMA read completion timeout\n", URMA_SERVER_NAME);
-		return ret;
-	}
-
-	if (cr.status != UBCORE_CR_SUCCESS) {
-		pr_err("%s: RDMA read failed with status %d\n",
-		       URMA_SERVER_NAME, cr.status);
-		return -EIO;
-	}
-
-	pr_info("%s: RDMA read completed successfully, read %u bytes\n",
-		URMA_SERVER_NAME, cr.completion_len);
+	if (bytes_read)
+		*bytes_read = total_len;
+	pr_info("%s: RDMA read completed successfully, requested total %u bytes\n",
+		URMA_SERVER_NAME, total_len);
 
 	/* Print first few bytes of read data */
 	pr_info("%s: Read data: %02x %02x %02x %02x %02x %02x %02x %02x\n",
@@ -641,31 +713,26 @@ static int urma_server_process_message(struct urma_server_ctx *ctx)
 
 	pr_info("%s: Received segment info from client\n", URMA_SERVER_NAME);
 
-	/* Import client's segment */
-	ret = urma_server_import_client_seg(ctx, msg);
+	/* Import client's page segments */
+	ret = urma_server_import_client_segs(ctx, msg);
 	if (ret) {
 		urma_server_send_reply(ctx, URMA_DEMO_STATUS_ERROR, 0);
 		return ret;
 	}
 
 	/* Perform RDMA read */
-	ret = urma_server_rdma_read(ctx);
+	ret = urma_server_rdma_read(ctx, &bytes_read);
 	if (ret) {
 		urma_server_send_reply(ctx, URMA_DEMO_STATUS_ERROR, 0);
 		goto cleanup;
 	}
 
-	bytes_read = URMA_DEMO_CLIENT_BUF_SIZE;
-
 	/* Send reply */
 	ret = urma_server_send_reply(ctx, URMA_DEMO_STATUS_SUCCESS, bytes_read);
 
 cleanup:
-	/* Cleanup imported segment (always unimport per-request) */
-	if (ctx->client_seg) {
-		ubcore_unimport_seg(ctx->client_seg);
-		ctx->client_seg = NULL;
-	}
+	/* Cleanup imported data segments (always unimport per-request) */
+	urma_server_unimport_client_segs(ctx);
 	/* Only unimport jetty if not early-imported (keep persistent) */
 	if (ctx->client_tjetty && !ctx->jetty_imported_early) {
 		ubcore_unimport_jetty(ctx->client_tjetty);
@@ -901,8 +968,7 @@ static void urma_server_remove_dev(struct ubcore_device *ub_dev,
 	}
 
 	/* Cleanup imported resources */
-	if (ctx->client_seg)
-		ubcore_unimport_seg(ctx->client_seg);
+	urma_server_unimport_client_segs(ctx);
 	if (ctx->client_tjetty)
 		ubcore_unimport_jetty(ctx->client_tjetty);
 
