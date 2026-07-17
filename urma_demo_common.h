@@ -61,7 +61,7 @@ struct urma_demo_seg_info_msg {
 	u8 reserved1[3]; /* Alignment padding */
 	u64 seg_va; /* Tdev-mapped IOVA of client data */
 	u32 seg_len; /* Length of client data to read */
-	u32 token; /* Segment access token */
+	u32 token; /* Optional segment token value; zero when disabled */
 	u32 token_id; /* Token ID */
 	u8 src_eid[URMA_DEMO_EID_SIZE]; /* Client's EID (16 bytes) */
 	u32 src_jetty_id; /* Client's jetty ID for reply */

@@ -90,7 +90,6 @@ struct urma_client_ctx {
 	u32 data_iova_len;
 	u32 data_tid;
 	u32 data_token_id;
-	u32 data_token_value;
 	u32 data_crc32;
 	void *send_buf; /* Send message buffer */
 	void *recv_buf; /* Receive buffer for reply */
@@ -211,17 +210,11 @@ static int urma_client_alloc_data_tdev(struct urma_client_ctx *ctx)
 		goto err_free_tdev;
 	}
 
-	get_random_bytes(&ctx->data_token_value,
-			 sizeof(ctx->data_token_value));
-	if (!ctx->data_token_value)
-		ctx->data_token_value = 1;
-
 	ctx->data_tid = tid;
 	ctx->data_token_id = tid << UDMA_TID_SHIFT;
 
-	pr_info("%s: Data tdev allocated, tid=%u, token_id=0x%x, token=0x%x\n",
-		URMA_CLIENT_NAME, ctx->data_tid, ctx->data_token_id,
-		ctx->data_token_value);
+	pr_info("%s: Data tdev allocated, tid=%u, token_id=0x%x\n",
+		URMA_CLIENT_NAME, ctx->data_tid, ctx->data_token_id);
 	return 0;
 
 err_free_tdev:
@@ -233,12 +226,8 @@ err_free_tdev:
 
 static int urma_client_grant_data_iova(struct urma_client_ctx *ctx)
 {
-	struct ummu_token_info token_info = {
-		.input = 0,
-		.tokenVal = ctx->data_token_value,
-	};
 	struct ummu_seg_attr seg_attr = {
-		.token = &token_info,
+		.token = NULL,
 		.e_bit = UMMU_EBIT_OFF,
 	};
 	int ret;
@@ -250,36 +239,32 @@ static int urma_client_grant_data_iova(struct urma_client_ctx *ctx)
 				     ctx->data_iova_len, UMMU_DEV_READ,
 				     &seg_attr);
 	if (ret) {
-		pr_err("%s: failed to grant data IOVA 0x%llx len=%u token=0x%x: %d\n",
+		pr_err("%s: failed to grant data IOVA 0x%llx len=%u: %d\n",
 		       URMA_CLIENT_NAME, (unsigned long long)ctx->data_iova,
-		       ctx->data_iova_len, ctx->data_token_value, ret);
+		       ctx->data_iova_len, ret);
 		return ret;
 	}
 
 	ctx->data_mapt_granted = true;
-	pr_info("%s: Data IOVA granted, iova=0x%llx len=%u token=0x%x\n",
+	pr_info("%s: Data IOVA granted, iova=0x%llx len=%u\n",
 		URMA_CLIENT_NAME, (unsigned long long)ctx->data_iova,
-		ctx->data_iova_len, ctx->data_token_value);
+		ctx->data_iova_len);
 	return 0;
 }
 
 static int urma_client_ungrant_data_iova(struct urma_client_ctx *ctx)
 {
-	struct ummu_token_info token_info = {
-		.input = 0,
-		.tokenVal = ctx->data_token_value,
-	};
 	int ret;
 
 	if (!ctx->data_mapt_granted)
 		return 0;
 
 	ret = urma_demo_domain_ungrant(ctx->data_domain, ctx->data_iova,
-				       ctx->data_iova_len, &token_info);
+				       ctx->data_iova_len, NULL);
 	if (ret) {
-		pr_err("%s: failed to ungrant data IOVA 0x%llx len=%u token=0x%x: %d\n",
+		pr_err("%s: failed to ungrant data IOVA 0x%llx len=%u: %d\n",
 		       URMA_CLIENT_NAME, (unsigned long long)ctx->data_iova,
-		       ctx->data_iova_len, ctx->data_token_value, ret);
+		       ctx->data_iova_len, ret);
 		return ret;
 	}
 
@@ -363,7 +348,6 @@ static void urma_client_release_data_window(struct urma_client_ctx *ctx)
 		ctx->data_domain = NULL;
 		ctx->data_tid = 0;
 		ctx->data_token_id = 0;
-		ctx->data_token_value = 0;
 	}
 }
 
@@ -794,14 +778,14 @@ static int urma_client_send_seg_info(struct urma_client_ctx *ctx)
 	msg->msg_type = URMA_DEMO_MSG_TYPE_SEG_INFO;
 	msg->seg_va = ctx->data_iova;
 	msg->seg_len = ctx->data_iova_len;
-	msg->token = ctx->data_token_value;
+	msg->token = 0;
 	msg->token_id = ctx->data_token_id;
 	memcpy(msg->src_eid, ctx->jetty->jetty_id.eid.raw, URMA_DEMO_EID_SIZE);
 	msg->src_jetty_id = ctx->jetty->jetty_id.id;
 
-	pr_info("%s: Sending seg info: iova=0x%llx, len=%u, token_id=0x%x, token=0x%x, jetty_id=%u\n",
+	pr_info("%s: Sending seg info: iova=0x%llx, len=%u, token_id=0x%x, jetty_id=%u\n",
 		URMA_CLIENT_NAME, msg->seg_va, msg->seg_len,
-		msg->token_id, msg->token, msg->src_jetty_id);
+		msg->token_id, msg->src_jetty_id);
 
 	/* Prepare send WR */
 	send_wr.opcode = UBCORE_OPC_SEND;
