@@ -34,6 +34,7 @@
 
 #define URMA_CLIENT_NAME "urma_demo_client"
 #define URMA_CLIENT_DATA_PAGE_COUNT (URMA_DEMO_CLIENT_BUF_SIZE / PAGE_SIZE)
+#define URMA_CLIENT_DATA_TDEV_DMA_MASK DMA_BIT_MASK(47)
 
 /* Module parameters */
 static char *server_eid = "";
@@ -174,6 +175,13 @@ static int urma_client_alloc_data_tdev(struct urma_client_ctx *ctx)
 	if (!ctx->data_tdev) {
 		pr_err("%s: failed to allocate data tdev\n", URMA_CLIENT_NAME);
 		return -ENODEV;
+	}
+	ret = dma_set_mask_and_coherent(ctx->data_tdev,
+					URMA_CLIENT_DATA_TDEV_DMA_MASK);
+	if (ret) {
+		pr_err("%s: failed to set data tdev DMA mask: %d\n",
+		       URMA_CLIENT_NAME, ret);
+		goto err_free_tdev;
 	}
 
 	ctx->data_domain = iommu_get_domain_for_dev(ctx->data_tdev);
